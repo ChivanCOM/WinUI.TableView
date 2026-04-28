@@ -1107,8 +1107,16 @@ public partial class TableView
     /// <summary>
     /// Throws an exception if the base ItemsSource property is set directly.
     /// </summary>
+    /// <remarks>
+    /// FOBO fork: the swap path in <c>SwapItemsSource</c> needs to set
+    /// <c>base.ItemsSource</c> when the caller hands in a custom
+    /// <see cref="ITableViewItemsSource"/>. That set is bracketed by
+    /// <c>_allowInternalBaseItemsSourceSet</c>, which we honour here
+    /// to suppress the throw for that one window only.
+    /// </remarks>
     private void OnBaseItemsSourceChanged(DependencyObject sender, DependencyProperty dp)
     {
+        if (_allowInternalBaseItemsSourceSet) return;
         throw new InvalidOperationException("Setting this property directly is not allowed. Use TableView.ItemsSource instead.");
     }
 

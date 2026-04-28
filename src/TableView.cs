@@ -35,6 +35,14 @@ public partial class TableView : ListView
     private RowDefinition? _headerRowDefinition;
     private bool _shouldThrowSelectionModeChangedException;
     private bool _ensureColumns = true;
+
+    // FOBO fork: suppresses the OnBaseItemsSourceChanged guard during
+    // SwapItemsSource. The upstream callback throws whenever
+    // base.ItemsSource is touched after construction so callers can't
+    // bypass the new ItemsSource property; the swap path here is a
+    // legitimate internal use, so we open a tiny window for it.
+    private bool _allowInternalBaseItemsSourceSet;
+
     private readonly List<TableViewRow> _rows = [];
 
     // FOBO fork: typed as the abstract <see cref="ITableViewItemsSource"/>
@@ -740,12 +748,26 @@ public partial class TableView : ListView
     /// new one, and re-attaches handlers. Called by
     /// <see cref="ItemsSourceChanged"/> when the host transitions
     /// between in-memory and custom sources.
+    ///
+    /// <para>
+    /// The base.ItemsSource assignment is bracketed by
+    /// <see cref="_allowInternalBaseItemsSourceSet"/> so the upstream
+    /// guard in <c>OnBaseItemsSourceChanged</c> doesn't throw.
+    /// </para>
     /// </summary>
     private void SwapItemsSource(ITableViewItemsSource newSource)
     {
         _collectionView.ItemPropertyChanged -= OnItemPropertyChanged;
         _collectionView = newSource;
-        base.ItemsSource = _collectionView;
+        _allowInternalBaseItemsSourceSet = true;
+        try
+        {
+            base.ItemsSource = _collectionView;
+        }
+        finally
+        {
+            _allowInternalBaseItemsSourceSet = false;
+        }
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
     }
 
