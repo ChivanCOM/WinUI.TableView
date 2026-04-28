@@ -96,7 +96,13 @@ public partial class TableViewColumnHeader : ContentControl
     /// </summary>
     private void DoSort(SD? direction, bool singleSorting = true)
     {
-        if (CanSort && Column is not null && _tableView is { CollectionView: CollectionView { } collectionView })
+        System.Diagnostics.Debug.WriteLine($"[TableViewColumnHeader] DoSort column={Column?.Header} direction={direction} canSort={CanSort} sourceType={_tableView?.CollectionView?.GetType().Name}");
+        // FOBO fork: accept any ITableViewItemsSource (the in-memory
+        // CollectionView or a custom SQL-backed source both qualify),
+        // not just the concrete CollectionView. The pre-fork pattern
+        // silently skipped the sort body for custom sources, which
+        // looked like "click does nothing" to the user.
+        if (CanSort && Column is not null && _tableView is { CollectionView: ITableViewItemsSource collectionView })
         {
             var eventArgs = new TableViewSortingEventArgs(Column);
             _tableView.OnSorting(eventArgs);
@@ -140,7 +146,9 @@ public partial class TableViewColumnHeader : ContentControl
             return;
         }
 
-        if (CanSort && _tableView?.CollectionView is CollectionView { } collectionView && Column is not null)
+        // FOBO fork: same broadening as DoSort — accept any
+        // ITableViewItemsSource so clear-sort works for custom sources.
+        if (CanSort && _tableView?.CollectionView is ITableViewItemsSource collectionView && Column is not null)
         {
             using var defer = collectionView.DeferRefresh();
             _tableView.DeselectAll();

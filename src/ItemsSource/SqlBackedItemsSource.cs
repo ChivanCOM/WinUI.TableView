@@ -34,6 +34,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -283,6 +284,7 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
         _pageLruNodes.Clear();
         _pagesInFlight.Clear();
 
+        Debug.WriteLine($"[SqlBackedItemsSource] Refresh — sorts={_sortDescriptions.Count} filters={_filterDescriptions.Count}");
         IsBusy = true;
         _ = RefreshCountAsync(_cts.Token);
     }
@@ -326,9 +328,12 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     {
         try
         {
+            var sw       = Stopwatch.StartNew();
             var query    = CurrentQuery();
             var newCount = await _countAsync(query, ct).ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
+
+            Debug.WriteLine($"[SqlBackedItemsSource] count returned {newCount} in {sw.ElapsedMilliseconds} ms");
 
             var oldCount = _count;
             _count = newCount;
@@ -368,6 +373,7 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     {
         try
         {
+            var sw     = Stopwatch.StartNew();
             var query  = CurrentQuery();
             var offset = pageIndex * _pageSize;
             var limit  = Math.Min(_pageSize, Math.Max(0, _count - offset));
@@ -379,6 +385,8 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
 
             var rows = await _pageAsync(query, offset, limit, ct).ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
+
+            Debug.WriteLine($"[SqlBackedItemsSource] page {pageIndex} ({offset}..{offset+limit-1}) -> {rows.Count} rows in {sw.ElapsedMilliseconds} ms");
 
             // Materialise into a fixed-size buffer so page-cache lookups
             // can index without bounds checks even if the host returned
