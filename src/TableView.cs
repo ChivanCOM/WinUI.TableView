@@ -43,7 +43,10 @@ public partial class TableView : ListView
     // SQL-backed virtual source). The default constructor still uses
     // <see cref="CollectionView"/>; nothing about runtime behaviour
     // changes for callers that don't supply their own source.
-    private readonly ITableViewItemsSource _collectionView = new CollectionView();
+    //
+    // Not <c>readonly</c> because <see cref="SwapItemsSource"/> replaces
+    // the slot when the caller hands us a custom <see cref="ITableViewItemsSource"/>.
+    private ITableViewItemsSource _collectionView = new CollectionView();
 
     /// <summary>
     /// Initializes a new instance of the TableView class.
@@ -681,9 +684,44 @@ public partial class TableView : ListView
     /// <summary>
     /// Handles the ItemsSource property changed event.
     /// </summary>
+    /// <remarks>
+    /// FOBO fork: when the caller hands us an
+    /// <see cref="ITableViewItemsSource"/> directly we replace the
+    /// in-memory <see cref="CollectionView"/> slot with it instead of
+    /// wrapping it. That preserves whatever virtualization strategy
+    /// the custom source implements (SQL paging, async loading, etc.)
+    /// — wrapping it in a <see cref="CollectionView"/> would force
+    /// every row to materialise during the wrapper's source-changed
+    /// scan, which defeats the point.
+    ///
+    /// If the caller later sets ItemsSource back to a plain
+    /// <see cref="IEnumerable"/> we restore the default in-memory
+    /// source so the original behaviour is fully reversible.
+    /// </remarks>
     private void ItemsSourceChanged(DependencyPropertyChangedEventArgs e)
     {
         DetailsPaneStates.Clear();
+
+        // Custom source: take it directly and stop here.
+        if (e.NewValue is ITableViewItemsSource customSource &&
+            !ReferenceEquals(customSource, _collectionView))
+        {
+            SwapItemsSource(customSource);
+            EnsureAutoColumns();
+            return;
+        }
+
+        // Fall-through: default in-memory wrapping. If we previously
+        // swapped to a custom source, swap back to a fresh
+        // CollectionView so the existing Source-based path applies.
+        // (`is not CollectionView _` rather than `is not CollectionView`
+        // because TableView also exposes a public CollectionView property,
+        // which makes the bare type name resolve as a constant pattern
+        // here.)
+        if (_collectionView is not CollectionView _)
+        {
+            SwapItemsSource(new CollectionView());
+        }
 
         using var defer = _collectionView.DeferRefresh();
         _collectionView.Source = null!;
@@ -694,6 +732,21 @@ public partial class TableView : ListView
 
             _collectionView.Source = source;
         }
+    }
+
+    /// <summary>
+    /// FOBO fork: swap the active items-source. Detaches event handlers
+    /// from the old source, re-points the underlying ListView at the
+    /// new one, and re-attaches handlers. Called by
+    /// <see cref="ItemsSourceChanged"/> when the host transitions
+    /// between in-memory and custom sources.
+    /// </summary>
+    private void SwapItemsSource(ITableViewItemsSource newSource)
+    {
+        _collectionView.ItemPropertyChanged -= OnItemPropertyChanged;
+        _collectionView = newSource;
+        base.ItemsSource = _collectionView;
+        _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
     }
 
     /// <summary>
