@@ -15,7 +15,14 @@ namespace WinUI.TableView;
 /// <summary>
 /// A collection view implementation that supports filtering, sorting, and incremental loading.
 /// </summary>
-internal partial class CollectionView : ICollectionView, ISupportIncrementalLoading, INotifyPropertyChanged, IComparer<object?>
+/// <remarks>
+/// FOBO fork: this is the in-memory implementation of
+/// <see cref="ITableViewItemsSource"/>. The interface was added so the
+/// host application can plug in an alternative source (for example a
+/// SQL-backed virtual list) without forking the control further. The
+/// behaviour of this class itself is unchanged.
+/// </remarks>
+internal partial class CollectionView : ICollectionView, ISupportIncrementalLoading, INotifyPropertyChanged, IComparer<object?>, ITableViewItemsSource
 {
     private IEnumerable _source = new List<object>();
     private object[] _itemsCopy = []; // In case the source is ICollection, keep a copy of the items to keep track of removed items.

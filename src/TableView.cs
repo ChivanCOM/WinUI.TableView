@@ -36,7 +36,14 @@ public partial class TableView : ListView
     private bool _shouldThrowSelectionModeChangedException;
     private bool _ensureColumns = true;
     private readonly List<TableViewRow> _rows = [];
-    private readonly CollectionView _collectionView = [];
+
+    // FOBO fork: typed as the abstract <see cref="ITableViewItemsSource"/>
+    // contract instead of the concrete <see cref="CollectionView"/>, so a
+    // host application can supply its own implementation (e.g. a
+    // SQL-backed virtual source). The default constructor still uses
+    // <see cref="CollectionView"/>; nothing about runtime behaviour
+    // changes for callers that don't supply their own source.
+    private readonly ITableViewItemsSource _collectionView = new CollectionView();
 
     /// <summary>
     /// Initializes a new instance of the TableView class.
