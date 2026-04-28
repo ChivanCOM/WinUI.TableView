@@ -142,6 +142,25 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     private int _count;
 
     /// <summary>
+    /// True between <see cref="Refresh"/> and the resulting count
+    /// fetch completing (or being cancelled). Surface so host UIs can
+    /// show a spinner / loading overlay during sort / filter / search
+    /// changes — the count fetch is the user-visible "is the grid
+    /// re-shuffling?" signal.
+    /// </summary>
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (_isBusy == value) return;
+            _isBusy = value;
+            RaisePropertyChanged(nameof(IsBusy));
+        }
+    }
+    private bool _isBusy;
+
+    /// <summary>
     /// Sort descriptions; observable so we can re-fetch when entries
     /// are added or removed. <see cref="TableView"/> mutates this
     /// collection directly when the user clicks a header.
@@ -264,6 +283,7 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
         _pageLruNodes.Clear();
         _pagesInFlight.Clear();
 
+        IsBusy = true;
         _ = RefreshCountAsync(_cts.Token);
     }
 
@@ -321,6 +341,12 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
             if (newCount != oldCount) RaisePropertyChanged(nameof(Count));
         }
         catch (OperationCanceledException) { /* superseded by a newer refresh */ }
+        finally
+        {
+            // Only clear busy if this CTS is still the active one; a
+            // newer Refresh() may already have bumped IsBusy back on.
+            if (!ct.IsCancellationRequested) IsBusy = false;
+        }
     }
 
     /// <summary>
