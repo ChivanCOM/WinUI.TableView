@@ -143,6 +143,15 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     private int _count;
 
     /// <summary>
+    /// Most recently requested row index — proxy for "where is the
+    /// visible viewport anchored". Updated on every <see cref="this[int]"/>
+    /// access, used by <see cref="RefreshCountAsync"/> to decide which
+    /// page to pre-fetch first so the viewport's rows update before
+    /// any other.
+    /// </summary>
+    private int _lastAccessedIndex;
+
+    /// <summary>
     /// True between <see cref="Refresh"/> and the resulting count
     /// fetch completing (or being cancelled). Surface so host UIs can
     /// show a spinner / loading overlay during sort / filter / search
@@ -284,7 +293,6 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
         _pageLruNodes.Clear();
         _pagesInFlight.Clear();
 
-        Debug.WriteLine($"[SqlBackedItemsSource] Refresh — sorts={_sortDescriptions.Count} filters={_filterDescriptions.Count}");
         IsBusy = true;
         _ = RefreshCountAsync(_cts.Token);
     }
@@ -328,22 +336,41 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     {
         try
         {
-            var sw       = Stopwatch.StartNew();
             var query    = CurrentQuery();
             var newCount = await _countAsync(query, ct).ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
 
-            Debug.WriteLine($"[SqlBackedItemsSource] count returned {newCount} in {sw.ElapsedMilliseconds} ms");
-
             var oldCount = _count;
             _count = newCount;
-
-            // A whole-collection reset is the cleanest signal: ListView
-            // re-asks for Count, walks the visible viewport, and we
-            // start serving placeholders + page fetches for the new
-            // index range.
-            RaiseReset();
             if (newCount != oldCount) RaisePropertyChanged(nameof(Count));
+
+            // Pre-fetch the page containing the most-recently accessed
+            // index — that's where the visible viewport is anchored.
+            // After it lands, per-row Replace events update only the
+            // visible cells. We deliberately do NOT raise Reset here:
+            // Reset is heavy in Uno's ListView at large item counts
+            // (it tears down recycled containers and can run a
+            // measurement pass proportional to the previously realized
+            // range), and unnecessary — ListView's existing containers
+            // re-bind to the new RecordRow when their indexed Replace
+            // event fires.
+            if (newCount > 0)
+            {
+                var anchor    = Math.Clamp(_lastAccessedIndex, 0, newCount - 1);
+                var pageIndex = anchor / _pageSize;
+                var offset    = pageIndex * _pageSize;
+                var limit     = Math.Min(_pageSize, newCount - offset);
+
+                var pageRows  = await _pageAsync(query, offset, limit, ct).ConfigureAwait(true);
+                if (ct.IsCancellationRequested) return;
+
+                var buffer = new object?[pageRows.Count];
+                for (var i = 0; i < pageRows.Count; i++) buffer[i] = pageRows[i];
+                _pages[pageIndex] = buffer;
+                TouchLru(pageIndex);
+
+                RaisePageLoaded(offset, buffer);
+            }
         }
         catch (OperationCanceledException) { /* superseded by a newer refresh */ }
         finally
@@ -373,7 +400,6 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     {
         try
         {
-            var sw     = Stopwatch.StartNew();
             var query  = CurrentQuery();
             var offset = pageIndex * _pageSize;
             var limit  = Math.Min(_pageSize, Math.Max(0, _count - offset));
@@ -385,8 +411,6 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
 
             var rows = await _pageAsync(query, offset, limit, ct).ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
-
-            Debug.WriteLine($"[SqlBackedItemsSource] page {pageIndex} ({offset}..{offset+limit-1}) -> {rows.Count} rows in {sw.ElapsedMilliseconds} ms");
 
             // Materialise into a fixed-size buffer so page-cache lookups
             // can index without bounds checks even if the host returned
@@ -402,13 +426,11 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
             TouchLru(pageIndex);
             EvictIfNeeded();
 
-            // Single page-level Reset rather than N per-row Replace
-            // notifications. See RaisePageLoaded for why — Replace
-            // events can be silently dropped by ListView impls that
-            // recycle containers by item identity rather than by
-            // index, and our placeholder→real swap is exactly that
-            // case (the new RecordRow is a different instance).
-            RaisePageLoaded(offset, buffer.Length);
+            // Per-row Replace events for each filled-in row. The
+            // structural Reset already fired from RefreshCountAsync;
+            // page-loads only need to patch the specific indices that
+            // changed from Placeholder to a real row.
+            RaisePageLoaded(offset, buffer);
         }
         catch (OperationCanceledException)
         {
@@ -466,6 +488,11 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
         get
         {
             if ((uint)index >= (uint)_count) return Placeholder;
+
+            // Track the most recent access — Refresh uses it to decide
+            // which page to pre-fetch so the user's current viewport
+            // updates first, instead of always page 0.
+            _lastAccessedIndex = index;
 
             var pageIndex   = index / _pageSize;
             var indexInPage = index % _pageSize;
@@ -574,27 +601,30 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
 
     private void RaiseReset()
     {
-        Debug.WriteLine($"[SqlBackedItemsSource] RaiseReset (count={_count})");
         CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
         VectorChanged?    .Invoke(this, new VectorChangedEventArgs(CollectionChange.Reset));
     }
 
     /// <summary>
     /// Notifies subscribers that a previously-placeholder page has
-    /// been filled in. We raise a single Reset event for the whole
-    /// page rather than a Replace per row because some ListView
-    /// implementations recycle containers by item-identity and
-    /// don't re-bind on Replace when the swapped-in item is "new"
-    /// (different object instance) — a Reset forces the viewport to
-    /// re-ask for every visible index, which is the reliable signal.
-    /// Cost is one re-bind cycle per page, which is cheap relative
-    /// to the SQL fetch we just finished.
+    /// been filled in. Per-row Replace events (rather than a single
+    /// Reset) so ListView only re-binds the affected indices instead
+    /// of re-walking the whole realized range — the latter triggers
+    /// cascading layout passes when user scrolls then sorts, because
+    /// each Reset fires more page-fetches that fire more Resets.
+    /// Targeted Replace keeps the recycler quiet for unaffected rows.
     /// </summary>
-    private void RaisePageLoaded(int firstIndex, int count)
+    private void RaisePageLoaded(int firstIndex, object?[] page)
     {
-        Debug.WriteLine($"[SqlBackedItemsSource] RaisePageLoaded ({firstIndex}..{firstIndex+count-1})");
-        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
-        VectorChanged?    .Invoke(this, new VectorChangedEventArgs(CollectionChange.Reset));
+        for (var i = 0; i < page.Length; i++)
+        {
+            var globalIndex = firstIndex + i;
+            var item        = page[i];
+            VectorChanged?.Invoke(this, new VectorChangedEventArgs(CollectionChange.ItemChanged, globalIndex, item));
+            CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
+                NotifyCollectionChangedAction.Replace,
+                newItem: item, oldItem: Placeholder, index: globalIndex));
+        }
     }
 
     private void RaisePropertyChanged(string name) =>

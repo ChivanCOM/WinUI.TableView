@@ -16,6 +16,7 @@
 using Microsoft.UI.Xaml.Data;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using Windows.Foundation;
 
@@ -58,7 +59,8 @@ namespace WinUI.TableView;
 /// </remarks>
 public interface ITableViewItemsSource :
     ICollectionView,
-    INotifyPropertyChanged
+    INotifyPropertyChanged,
+    INotifyCollectionChanged
 {
     /// <summary>
     /// Gets or sets the underlying source collection. Setting this should

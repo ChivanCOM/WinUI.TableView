@@ -96,7 +96,6 @@ public partial class TableViewColumnHeader : ContentControl
     /// </summary>
     private void DoSort(SD? direction, bool singleSorting = true)
     {
-        System.Diagnostics.Debug.WriteLine($"[TableViewColumnHeader] DoSort column={Column?.Header} direction={direction} canSort={CanSort} sourceType={_tableView?.CollectionView?.GetType().Name}");
         // FOBO fork: accept any ITableViewItemsSource (the in-memory
         // CollectionView or a custom SQL-backed source both qualify),
         // not just the concrete CollectionView. The pre-fork pattern

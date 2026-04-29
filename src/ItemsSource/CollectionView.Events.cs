@@ -1,5 +1,6 @@
 ﻿using Microsoft.UI.Xaml.Data;
 using System;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Windows.Foundation.Collections;
@@ -88,4 +89,18 @@ partial class CollectionView
     /// Occurs when an item's property value changes.
     /// </summary>
     public event PropertyChangedEventHandler? ItemPropertyChanged;
+
+    /// <summary>
+    /// FOBO fork: declared to satisfy <see cref="ITableViewItemsSource"/>'s
+    /// <see cref="INotifyCollectionChanged"/> contract. The in-memory
+    /// <see cref="CollectionView"/> uses <see cref="VectorChanged"/> for
+    /// its actual change notifications and never invokes this event;
+    /// it exists purely so the type implements the interface and the
+    /// fork's TableView can statically subscribe through the interface.
+    /// </summary>
+    public event NotifyCollectionChangedEventHandler? CollectionChanged
+    {
+        add    { /* in-memory path never raises CollectionChanged */ }
+        remove { }
+    }
 }
