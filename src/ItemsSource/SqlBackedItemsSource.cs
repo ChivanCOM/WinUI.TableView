@@ -402,14 +402,13 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
             TouchLru(pageIndex);
             EvictIfNeeded();
 
-            // Notify the bound list that each row in this page now has
-            // a real value. ListView listens to VectorChanged and
-            // refreshes the cells whose data context changed.
-            for (var i = 0; i < buffer.Length; i++)
-            {
-                var globalIndex = offset + i;
-                RaiseReplace(globalIndex, buffer[i]);
-            }
+            // Single page-level Reset rather than N per-row Replace
+            // notifications. See RaisePageLoaded for why — Replace
+            // events can be silently dropped by ListView impls that
+            // recycle containers by item identity rather than by
+            // index, and our placeholder→real swap is exactly that
+            // case (the new RecordRow is a different instance).
+            RaisePageLoaded(offset, buffer.Length);
         }
         catch (OperationCanceledException)
         {
@@ -563,24 +562,39 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     // ── Change notifications ───────────────────────────────────────
 
     public event NotifyCollectionChangedEventHandler? CollectionChanged;
-    public event VectorChangedEventHandler<object?>?  VectorChanged;
+
+    /// <summary>
+    /// Generic argument is <c>object</c> (not <c>object?</c>) to match
+    /// <see cref="IObservableVector{T}.VectorChanged"/>'s contract on
+    /// <see cref="ICollectionView"/>; Uno-side ListView subscribes via
+    /// the interface, so a nullable mismatch can quietly drop events.
+    /// </summary>
+    public event VectorChangedEventHandler<object>?   VectorChanged;
     public event PropertyChangedEventHandler?         PropertyChanged;
 
     private void RaiseReset()
     {
+        Debug.WriteLine($"[SqlBackedItemsSource] RaiseReset (count={_count})");
         CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
         VectorChanged?    .Invoke(this, new VectorChangedEventArgs(CollectionChange.Reset));
     }
 
-    private void RaiseReplace(int index, object? item)
+    /// <summary>
+    /// Notifies subscribers that a previously-placeholder page has
+    /// been filled in. We raise a single Reset event for the whole
+    /// page rather than a Replace per row because some ListView
+    /// implementations recycle containers by item-identity and
+    /// don't re-bind on Replace when the swapped-in item is "new"
+    /// (different object instance) — a Reset forces the viewport to
+    /// re-ask for every visible index, which is the reliable signal.
+    /// Cost is one re-bind cycle per page, which is cheap relative
+    /// to the SQL fetch we just finished.
+    /// </summary>
+    private void RaisePageLoaded(int firstIndex, int count)
     {
-        // ListView listens to VectorChanged; CollectionChanged is fired
-        // for the benefit of any binding that uses the .NET-side
-        // INotifyCollectionChanged contract.
-        VectorChanged?.Invoke(this, new VectorChangedEventArgs(CollectionChange.ItemChanged, index, item));
-        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
-            NotifyCollectionChangedAction.Replace,
-            newItem: item, oldItem: Placeholder, index: index));
+        Debug.WriteLine($"[SqlBackedItemsSource] RaisePageLoaded ({firstIndex}..{firstIndex+count-1})");
+        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+        VectorChanged?    .Invoke(this, new VectorChangedEventArgs(CollectionChange.Reset));
     }
 
     private void RaisePropertyChanged(string name) =>
