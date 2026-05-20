@@ -342,7 +342,37 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
 
             var oldCount = _count;
             _count = newCount;
-            if (newCount != oldCount) RaisePropertyChanged(nameof(Count));
+            if (newCount != oldCount)
+            {
+                RaisePropertyChanged(nameof(Count));
+                // Tell the bound grid about the count delta so its row
+                // container manager grows / shrinks slots. Without this,
+                // ListView only re-binds the indices it already knew
+                // about and ignores the appended tail — symptom: new
+                // records arrive but the visible row count never grows.
+                // Placeholder rows materialise into real ones via the
+                // existing per-page Replace events.
+                if (newCount > oldCount)
+                {
+                    for (var i = oldCount; i < newCount; i++)
+                    {
+                        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
+                            NotifyCollectionChangedAction.Add, Placeholder, i));
+                        VectorChanged?.Invoke(this, new VectorChangedEventArgs(
+                            CollectionChange.ItemInserted, i));
+                    }
+                }
+                else
+                {
+                    for (var i = oldCount - 1; i >= newCount; i--)
+                    {
+                        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
+                            NotifyCollectionChangedAction.Remove, Placeholder, i));
+                        VectorChanged?.Invoke(this, new VectorChangedEventArgs(
+                            CollectionChange.ItemRemoved, i));
+                    }
+                }
+            }
 
             // Pre-fetch the page containing the most-recently accessed
             // index — that's where the visible viewport is anchored.
@@ -534,18 +564,45 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     public bool Remove(object? item)     => throw new NotSupportedException("SqlBackedItemsSource is read-only.");
     public void RemoveAt(int index)      => throw new NotSupportedException("SqlBackedItemsSource is read-only.");
 
+    /// <summary>
+    /// Indexer-equivalent that does NOT trigger a page fetch when the
+    /// requested page is not cached — returns <see cref="Placeholder"/>
+    /// instead. Used by enumerator + <see cref="CopyTo"/>; both are
+    /// invoked by WinUI's <c>PrepareContainerForItemOverride</c>, which
+    /// itself fires on every Replace notification we raise. If those
+    /// paths re-triggered fetches we'd recurse into infinite RaisePageLoaded
+    /// → PrepareContainerForItemOverride → GetEnumerator → fetch → ...
+    /// (Discovered Apr 2026 when deleting a record after a fresh insert
+    /// produced a tight loop of Replace events for every page beyond the
+    /// viewport.)
+    /// </summary>
+    private object? PeekAt(int index)
+    {
+        if ((uint)index >= (uint)_count) return Placeholder;
+        var pageIndex   = index / _pageSize;
+        var indexInPage = index % _pageSize;
+        if (_pages.TryGetValue(pageIndex, out var page)) return page[indexInPage];
+        return Placeholder;
+    }
+
     public void CopyTo(object?[] array, int arrayIndex)
     {
         // Used by ICollection<T>; only the cached slice is visible to
         // a synchronous copy. Callers that need the full set should
-        // page through via the indexer.
+        // page through via the indexer. Use PeekAt to avoid cascading
+        // page fetches — this method is called from base WinUI code
+        // and a fetch-triggering copy here re-enters via Replace events.
         for (var i = 0; i < _count && arrayIndex + i < array.Length; i++)
-            array[arrayIndex + i] = this[i];
+            array[arrayIndex + i] = PeekAt(i);
     }
 
     public IEnumerator<object?> GetEnumerator()
     {
-        for (var i = 0; i < _count; i++) yield return this[i];
+        // PeekAt instead of this[i]: WinUI's base PrepareContainerForItemOverride
+        // walks the enumerator on every container prep, which itself fires
+        // for every Replace notification we raise. A fetch-triggering walk
+        // would loop indefinitely (see PeekAt remarks).
+        for (var i = 0; i < _count; i++) yield return PeekAt(i);
     }
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
