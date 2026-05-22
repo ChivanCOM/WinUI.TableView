@@ -288,6 +288,7 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
         oldCts.Cancel();
         oldCts.Dispose();
 
+        UnhookAll();
         _pages.Clear();
         _pageLru.Clear();
         _pageLruNodes.Clear();
@@ -309,14 +310,44 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     public void RefreshFilter() { /* deferred to a later phase */ }
 
     /// <summary>
-    /// Defined to satisfy <see cref="ITableViewItemsSource"/>; never
-    /// fires because items are not held in memory long enough for
-    /// in-place property-changed notifications to be meaningful.
+    /// Relays per-row <see cref="INotifyPropertyChanged.PropertyChanged"/>
+    /// from currently-cached page rows out to the TableView so
+    /// <c>TableView.OnItemPropertyChanged</c> can re-run
+    /// ConditionalCellStyle predicates and per-row tooltip producers
+    /// without a full page refresh. Subscriptions are added when a page
+    /// lands and removed on eviction / refresh / disposal so a long-
+    /// running grid doesn't accumulate dead handler references.
     /// </summary>
-    public event PropertyChangedEventHandler? ItemPropertyChanged
+    public event PropertyChangedEventHandler? ItemPropertyChanged;
+
+    /// <summary>Items currently subscribed for property-changed relay (live across pages until evicted).</summary>
+    private readonly HashSet<INotifyPropertyChanged> _subscribed = new();
+
+    private void OnRowPropertyChanged(object? sender, PropertyChangedEventArgs e) =>
+        ItemPropertyChanged?.Invoke(sender, e);
+
+    private void HookPage(object?[] buffer)
     {
-        add    { /* no items to observe */ }
-        remove { /* no items to observe */ }
+        foreach (var item in buffer)
+        {
+            if (item is INotifyPropertyChanged npc && _subscribed.Add(npc))
+                npc.PropertyChanged += OnRowPropertyChanged;
+        }
+    }
+
+    private void UnhookPage(object?[] buffer)
+    {
+        foreach (var item in buffer)
+        {
+            if (item is INotifyPropertyChanged npc && _subscribed.Remove(npc))
+                npc.PropertyChanged -= OnRowPropertyChanged;
+        }
+    }
+
+    private void UnhookAll()
+    {
+        foreach (var npc in _subscribed) npc.PropertyChanged -= OnRowPropertyChanged;
+        _subscribed.Clear();
     }
 
     // ── Sort/filter description bookkeeping ─────────────────────────
@@ -398,6 +429,7 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
                 for (var i = 0; i < pageRows.Count; i++) buffer[i] = pageRows[i];
                 _pages[pageIndex] = buffer;
                 TouchLru(pageIndex);
+                HookPage(buffer);
 
                 RaisePageLoaded(offset, buffer);
             }
@@ -454,6 +486,10 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
             _pages[pageIndex] = buffer;
             _pagesInFlight.Remove(pageIndex);
             TouchLru(pageIndex);
+            // Subscribe BEFORE eviction so an item that lives in multiple
+            // pages keeps one live subscription even if its other page
+            // gets evicted.
+            HookPage(buffer);
             EvictIfNeeded();
 
             // Per-row Replace events for each filled-in row. The
@@ -493,6 +529,8 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
         {
             _pageLru.RemoveFirst();
             _pageLruNodes.Remove(victim.Value);
+            if (_pages.TryGetValue(victim.Value, out var evictedBuffer))
+                UnhookPage(evictedBuffer);
             _pages.Remove(victim.Value);
             // No vector notification: the row indices still exist
             // (Count is unchanged); accessing them again will simply

@@ -222,6 +222,32 @@ public abstract partial class TableViewColumn : DependencyObject
     }
 
     /// <summary>
+    /// Optional per-row read-only predicate. When set, the callback is
+    /// invoked against each cell's bound data item; returning <c>true</c>
+    /// makes that single cell read-only even when the column itself is
+    /// editable. Lets callers gate inline editing against row-specific
+    /// state (per-row schema versions, role-based permissions, computed
+    /// fields whose source field is absent on this row, etc.) without
+    /// rewriting the column as a TableViewTemplateColumn.
+    /// <para>
+    /// Column-wide <see cref="IsReadOnly"/> still wins — when the column
+    /// is read-only every cell is read-only regardless of this callback.
+    /// </para>
+    /// </summary>
+    public Func<object?, bool>? IsCellReadOnlyForRow { get; set; }
+
+    /// <summary>
+    /// Optional per-row tooltip producer. When set, the callback is invoked
+    /// against each cell's bound data item; a non-null/non-empty result is
+    /// applied via <see cref="Microsoft.UI.Xaml.Controls.ToolTipService"/>
+    /// on the cell. Lets callers surface per-row diagnostic text (e.g.
+    /// validation errors) without subclassing the cell or rewriting the
+    /// column as a TableViewTemplateColumn. Returning null clears any
+    /// previously-set tooltip.
+    /// </summary>
+    public Func<object?, string?>? GetCellToolTip { get; set; }
+
+    /// <summary>
     /// Gets or sets the style that is used when rendering the column header.
     /// </summary>
     public Style? HeaderStyle

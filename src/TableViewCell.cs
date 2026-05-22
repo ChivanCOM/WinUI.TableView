@@ -580,12 +580,23 @@ public partial class TableViewCell : ContentControl
 
         Style = _cellStyles.FirstOrDefault(c => c.Predicate?.Invoke(new(Column!, item)) is true)?
                           .Style ?? Column?.CellStyle ?? TableView?.CellStyle;
+
+        // Per-row tooltip producer on the column lets callers surface
+        // row-specific diagnostic text (validation errors, etc.) without
+        // subclassing the cell or rewriting the column as a template column.
+        var tip = Column?.GetCellToolTip?.Invoke(item);
+        ToolTipService.SetToolTip(this, string.IsNullOrEmpty(tip) ? null : tip);
     }
 
     /// <summary>
-    /// Gets a value indicating whether the cell is read-only.
+    /// Gets a value indicating whether the cell is read-only. Combines the
+    /// TableView-wide flag, the column-level flag, the per-row callback on
+    /// the column (<see cref="TableViewColumn.IsCellReadOnlyForRow"/>) and
+    /// the template-column "no editing template" shortcut.
     /// </summary>
-    public bool IsReadOnly => TableView?.IsReadOnly is true || Column is TableViewTemplateColumn { EditingTemplate: null } or { IsReadOnly: true };
+    public bool IsReadOnly => TableView?.IsReadOnly is true
+        || Column is TableViewTemplateColumn { EditingTemplate: null } or { IsReadOnly: true }
+        || (Column?.IsCellReadOnlyForRow?.Invoke(DataContext) ?? false);
 
     /// <summary>
     /// Gets the slot for the cell.

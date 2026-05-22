@@ -79,6 +79,11 @@ public partial class TableViewToggleSwitchColumn : TableViewBoundColumn
                 var bindingExpression = toggleSwitch.GetBindingExpression(ToggleSwitch.IsOnProperty);
                 bindingExpression?.UpdateSource();
             }
+            else
+            {
+                toggleSwitch.IsOn = uneditedValue is bool b && b;
+                toggleSwitch.GetBindingExpression(ToggleSwitch.IsOnProperty)?.UpdateSource();
+            }
         }
     }
 

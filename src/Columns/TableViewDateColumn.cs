@@ -91,6 +91,11 @@ public partial class TableViewDateColumn : TableViewBoundColumn
                 var bindingExpression = datePicker.GetBindingExpression(TableViewDatePicker.SelectedDateProperty);
                 bindingExpression?.UpdateSource();
             }
+            else
+            {
+                datePicker.SelectedDate = uneditedValue as DateTimeOffset?;
+                datePicker.GetBindingExpression(TableViewDatePicker.SelectedDateProperty)?.UpdateSource();
+            }
         }
     }
 

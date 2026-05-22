@@ -93,6 +93,11 @@ public partial class TableViewComboBoxColumn : TableViewBoundColumn
                 var bindingExpression = comboBox.GetBindingExpression(Selector.SelectedItemProperty);
                 bindingExpression?.UpdateSource();
             }
+            else
+            {
+                comboBox.SelectedItem = uneditedValue;
+                comboBox.GetBindingExpression(Selector.SelectedItemProperty)?.UpdateSource();
+            }
         }
     }
 

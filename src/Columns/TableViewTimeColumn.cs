@@ -94,6 +94,11 @@ public partial class TableViewTimeColumn : TableViewBoundColumn
                 var bindingExpression = timePicker.GetBindingExpression(TimePicker.SelectedTimeProperty);
                 bindingExpression?.UpdateSource();
             }
+            else
+            {
+                timePicker.SelectedTime = uneditedValue as TimeSpan?;
+                timePicker.GetBindingExpression(TimePicker.SelectedTimeProperty)?.UpdateSource();
+            }
         }
     }
 

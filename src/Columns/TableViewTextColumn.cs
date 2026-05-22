@@ -67,6 +67,14 @@ public partial class TableViewTextColumn : TableViewBoundColumn
                 var bindingExpression = textBox.GetBindingExpression(TextBox.TextProperty);
                 bindingExpression?.UpdateSource();
             }
+            else
+            {
+                // Cancel — revert the editor (which with UpdateSourceTrigger=
+                // PropertyChanged also pushes the unedited value back to the
+                // bound source, undoing every keystroke since edit began).
+                textBox.Text = uneditedValue as string ?? string.Empty;
+                textBox.GetBindingExpression(TextBox.TextProperty)?.UpdateSource();
+            }
         }
     }
 }

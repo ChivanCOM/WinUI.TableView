@@ -71,6 +71,14 @@ public partial class TableViewNumberColumn : TableViewBoundColumn
                 var bindingExpression = numberBox.GetBindingExpression(NumberBox.ValueProperty);
                 bindingExpression?.UpdateSource();
             }
+            else
+            {
+                // Cancel — revert editor + binding source (PropertyChanged
+                // trigger leaks every keystroke through; without this the
+                // bad value stays on the row).
+                numberBox.Value = uneditedValue is double d ? d : double.NaN;
+                numberBox.GetBindingExpression(NumberBox.ValueProperty)?.UpdateSource();
+            }
         }
     }
 }
