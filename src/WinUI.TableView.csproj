@@ -6,8 +6,21 @@
       net10.0;
     </TargetFrameworks>
     <LangVersion>12</LangVersion>
-    <Nullable>enable</Nullable> 
+    <Nullable>enable</Nullable>
     <IsAOTCompatible>true</IsAOTCompatible>
+    <!--
+      Uno0001: drag/drop theme animations in TableViewRow.xaml's reorder visual
+        states (DragItemThemeAnimation / DragOverThemeAnimation /
+        DropTargetItemThemeAnimation / VisualTransition.GeneratedDuration) are
+        not implemented in Uno. Pure Windows-WinUI polish; safe no-op under Uno.
+      IL2070/IL2075: the lib binds data by property-name reflection
+        (ObjectExtensions, TypeExtensions, TableView core, Date/Time columns).
+        Inherent to a runtime binding library; properly annotating every
+        reflection callsite with DynamicallyAccessedMembers would diverge
+        heavily from upstream w-ahmad/WinUI.TableView. The consuming app
+        (DataMaker desktop) doesn't trim, so these are noise.
+    -->
+    <NoWarn>$(NoWarn);Uno0001;IL2070;IL2075</NoWarn>
     <TargetFrameworks Condition="'$(OS)' == 'Windows_NT'">
       net8.0-windows10.0.19041.0;
       net9.0-windows10.0.19041.0;

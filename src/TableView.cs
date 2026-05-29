@@ -469,7 +469,12 @@ public partial class TableView : ListView
     {
         // Skip TableView copy logic when a cell editor already handles Ctrl+C.
         // TextBox, PasswordBox, and RichEditBox all implement their own copy behavior.
-        var focused = FocusManager.GetFocusedElement() as FrameworkElement;
+        // FocusManager.GetFocusedElement(XamlRoot) replaces the obsolete no-arg
+        // overload (CS0618); guard XamlRoot in case we're called before the
+        // control is attached to a visual tree.
+        var focused = XamlRoot is { } xr
+            ? FocusManager.GetFocusedElement(xr) as FrameworkElement
+            : null;
         if (focused is TextBox || focused is PasswordBox || focused is RichEditBox)
         {
             return;
