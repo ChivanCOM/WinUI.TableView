@@ -19,8 +19,14 @@
         reflection callsite with DynamicallyAccessedMembers would diverge
         heavily from upstream w-ahmad/WinUI.TableView. The consuming app
         (DataMaker desktop) doesn't trim, so these are noise.
+      CS1591: missing XML doc on public members. The Release block below turns
+        on GenerateDocumentationFile (for NuGet packing), which flags every
+        FOBO-added member on SqlBackedItemsSource. DataMaker consumes this as a
+        project reference, not a package, so the docs aren't published — and the
+        fork's additions are intentionally undocumented vs upstream. Without
+        this, any Release publish of the consuming app fails.
     -->
-    <NoWarn>$(NoWarn);Uno0001;IL2070;IL2075</NoWarn>
+    <NoWarn>$(NoWarn);Uno0001;IL2070;IL2075;CS1591</NoWarn>
     <TargetFrameworks Condition="'$(OS)' == 'Windows_NT'">
       net8.0-windows10.0.19041.0;
       net9.0-windows10.0.19041.0;
