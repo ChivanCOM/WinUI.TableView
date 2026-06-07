@@ -123,6 +123,18 @@ public partial class TableView : ListView
     {
         base.PrepareContainerForItemOverride(element, item);
 
+        // Track the row as currently-realized. Added here (on realize), removed
+        // in ClearContainerForItemOverride (on recycle) so _rows stays bounded
+        // to the viewport. Previously rows were added in GetContainerForItemOverride
+        // and never removed — _rows grew without bound across scrolling, leaking
+        // every TableViewRow ever created and turning the _rows iteration in
+        // selection / layout / grid-line passes into an O(rows-ever-realized)
+        // walk that compounds the per-click cost on large virtualized sources.
+        if (element is TableViewRow tracked && !_rows.Contains(tracked))
+        {
+            _rows.Add(tracked);
+        }
+
         DispatcherQueue.TryEnqueue(() =>
         {
             if (element is TableViewRow row)
@@ -130,6 +142,10 @@ public partial class TableView : ListView
                 row.EnsureCellsStyle(default, item);
                 row.ApplyCellsSelectionState();
                 row.RowPresenter?.ApplyDetailsPaneState(item);
+
+                // Logical all-selected: a row scrolled into view shows selected
+                // unless it's been excluded.
+                ApplyLogicalSelectionVisual(row);
 
                 if (CurrentCellSlot.HasValue)
                 {
@@ -148,8 +164,24 @@ public partial class TableView : ListView
         row.SetBinding(FontFamilyProperty, new Binding { Path = new("TableView.FontFamily"), RelativeSource = new() { Mode = RelativeSourceMode.Self } });
         row.SetBinding(FontSizeProperty, new Binding { Path = new("TableView.FontSize"), RelativeSource = new() { Mode = RelativeSourceMode.Self } });
 
-        _rows.Add(row);
+        // NOTE: do NOT add to _rows here. Containers are created once and then
+        // recycled across many items; tracking on creation (without a matching
+        // removal) leaked every row ever made. _rows membership is maintained
+        // in Prepare/ClearContainerForItemOverride instead.
         return row;
+    }
+
+    /// <inheritdoc/>
+    protected override void ClearContainerForItemOverride(DependencyObject element, object item)
+    {
+        base.ClearContainerForItemOverride(element, item);
+
+        // Recycle: drop the row from the realized set so _rows tracks only
+        // currently-visible rows (mirrors the add in PrepareContainerForItemOverride).
+        if (element is TableViewRow row)
+        {
+            _rows.Remove(row);
+        }
     }
 
     /// <inheritdoc/>
@@ -780,6 +812,10 @@ public partial class TableView : ListView
     {
         DetailsPaneStates.Clear();
 
+        // A new items source invalidates any selection — drop logical all-selected
+        // + exclusions so the flag can't carry over to unrelated data.
+        ClearAllSelectedState();
+
         // Custom source: take it directly and stop here.
         if (e.NewValue is ITableViewItemsSource customSource &&
             !ReferenceEquals(customSource, _collectionView))
@@ -1030,7 +1066,10 @@ public partial class TableView : ListView
                     break;
                 case ListViewSelectionMode.Multiple:
                 case ListViewSelectionMode.Extended:
-                    SelectRange(new ItemIndexRange(0, (uint)Items.Count));
+                    // Logical all-selected — O(1) flag, never materializes the
+                    // virtualized source. Replaces SelectRange(0, Items.Count),
+                    // which paged in + selected every row (hang on large data).
+                    SelectAllLogical();
                     break;
             }
         }
@@ -1083,7 +1122,12 @@ public partial class TableView : ListView
     /// </summary>
     private void DeselectAllItems()
     {
-        if (SelectedRanges.Count is 0) return;
+        // Clear logical all-selected FIRST — under it SelectedRanges is empty, so
+        // the early-return below would otherwise skip clearing the flag.
+        var wasAllSelected = IsAllSelected;
+        ClearAllSelectedState();
+
+        if (!wasAllSelected && SelectedRanges.Count is 0) return;
 
         switch (SelectionMode)
         {
@@ -1092,9 +1136,41 @@ public partial class TableView : ListView
                 break;
             case ListViewSelectionMode.Multiple:
             case ListViewSelectionMode.Extended:
-                DeselectRange(new ItemIndexRange(0, (uint)Items.Count));
+                // Deselect ONLY the items that are actually selected — O(selected).
+                // Previously this range-deselected [0, Items.Count), which walks
+                // the entire (virtualized) source via the indexer per call —
+                // paging in every row and hanging the app on large data sets even
+                // when just a couple of rows were selected.
+                ClearItemSelection();
                 break;
         }
+    }
+
+    /// <summary>
+    /// Clears the row selection in O(selected) by removing the items we already
+    /// hold in <see cref="ListViewBase.SelectedItems"/> — never an index walk
+    /// over <c>Items.Count</c> and never a re-fetch by index (which on a
+    /// virtualized source returns placeholders for evicted pages and would also
+    /// fail to remove the real item).
+    /// </summary>
+    private void ClearItemSelection()
+    {
+#if WINDOWS
+        foreach (var item in SelectedItems.Cast<object>().ToArray())
+        {
+            SelectedItems.Remove(item);
+        }
+#else
+        var removed = SelectedItems.Cast<object>().ToArray();
+        if (removed.Length == 0) return;
+
+        SetDisableRaiseSelectionChanged(true);
+        SelectedItems.Clear();
+        SelectedRanges.Clear();
+        SetDisableRaiseSelectionChanged(false);
+
+        InvokeSelectionChanged(removed, []);
+#endif
     }
 
     /// <summary>
@@ -1152,6 +1228,21 @@ public partial class TableView : ListView
     /// </summary>
     private void SelectRows(TableViewCellSlot slot, bool shiftKey, bool ctrlKey)
     {
+        // Clicks while logical all-selected:
+        //  • Ctrl-click → toggle that one row's exclusion (O(1)), stay all-selected.
+        //  • plain / shift click → collapse to an explicit selection, then proceed
+        //    through the normal path below (which selects the clicked row/range).
+        if (IsAllSelected)
+        {
+            if (ctrlKey && !shiftKey)
+            {
+                ToggleAllSelectionExclusion(slot.Row);
+                if (slot.IsValid(this)) CurrentCellSlot = slot;
+                return;
+            }
+            ClearAllSelectedState();
+        }
+
         var selectionRange = SelectedRanges.FirstOrDefault(x => x.IsInRange(slot.Row));
         SelectionStartRowIndex ??= slot.Row;
 
@@ -1493,7 +1584,12 @@ public partial class TableView : ListView
     {
         _shouldThrowSelectionModeChangedException = true;
 
-        base.SelectionMode = SelectionUnit is TableViewSelectionUnit.Cell ? ListViewSelectionMode.None : SelectionMode;
+        // EXPERIMENT (logical-selection redesign): force base None for rows too,
+        // so Uno's O(N) ExtendedSelectionCase never runs on a row click — the fork's
+        // MakeSelection/SelectRows is the sole row-selection authority (mirrors how
+        // cell selection already works under base None). Was:
+        //   SelectionUnit is Cell ? None : SelectionMode
+        base.SelectionMode = ListViewSelectionMode.None;
 
         UpdateHorizontalScrollBarMargin();
         _headerRow?.SetHeadersVisibility();

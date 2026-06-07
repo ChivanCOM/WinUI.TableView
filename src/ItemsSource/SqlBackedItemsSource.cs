@@ -143,6 +143,14 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     private int _count;
 
     /// <summary>
+    /// Above this absolute count delta, a refresh raises a single Reset instead
+    /// of per-index Add/Remove events. Per-index is right for a handful of live
+    /// records arriving; a filter/sort that swings the count by thousands would
+    /// otherwise fire O(delta) events on the UI thread and freeze the app.
+    /// </summary>
+    private const int BulkCountDeltaThreshold = 64;
+
+    /// <summary>
     /// Most recently requested row index — proxy for "where is the
     /// visible viewport anchored". Updated on every <see cref="this[int]"/>
     /// access, used by <see cref="RefreshCountAsync"/> to decide which
@@ -376,14 +384,28 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
             if (newCount != oldCount)
             {
                 RaisePropertyChanged(nameof(Count));
-                // Tell the bound grid about the count delta so its row
-                // container manager grows / shrinks slots. Without this,
-                // ListView only re-binds the indices it already knew
-                // about and ignores the appended tail — symptom: new
-                // records arrive but the visible row count never grows.
-                // Placeholder rows materialise into real ones via the
-                // existing per-page Replace events.
-                if (newCount > oldCount)
+
+                // Tell the bound grid about the count delta so its row container
+                // manager grows / shrinks slots.
+                //
+                // Small delta (a few records arriving from a live sync): emit
+                // per-index Add/Remove so the existing containers re-bind without
+                // a full teardown.
+                //
+                // Large delta (a filter / sort that swings the count by thousands
+                // — e.g. unchecking one value drops 1,000,000 → 500,000): a SINGLE
+                // Reset. Firing O(delta) per-index events here runs on the UI
+                // thread and froze the app (hundreds of thousands of event raises),
+                // and the busy ring couldn't even paint. One Reset rebuilds only
+                // the realized viewport (bounded since virtualization recycles).
+                var delta = newCount > oldCount ? newCount - oldCount : oldCount - newCount;
+                if (delta > BulkCountDeltaThreshold)
+                {
+                    CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
+                        NotifyCollectionChangedAction.Reset));
+                    VectorChanged?.Invoke(this, new VectorChangedEventArgs(CollectionChange.Reset));
+                }
+                else if (newCount > oldCount)
                 {
                     for (var i = oldCount; i < newCount; i++)
                     {
