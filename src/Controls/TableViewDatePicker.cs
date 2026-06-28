@@ -18,6 +18,17 @@ public partial class TableViewDatePicker : CalendarDatePicker
     public TableViewDatePicker()
     {
         DateChanged += OnDateChanged;
+        // This control is the cell's edit element (shown on double-tap). Open the
+        // calendar as soon as it loads so the user doesn't have to click the
+        // picker's button a second time to start picking a date.
+        Loaded += OnLoadedOpenCalendar;
+    }
+
+    private void OnLoadedOpenCalendar(object sender, RoutedEventArgs e)
+    {
+        Loaded -= OnLoadedOpenCalendar;   // one-shot: only on first show
+        // Defer to after layout so the flyout has a placement target.
+        DispatcherQueue?.TryEnqueue(() => IsCalendarOpen = true);
     }
 
     /// <summary>
@@ -68,7 +79,11 @@ public partial class TableViewDatePicker : CalendarDatePicker
                 DateOnly dateOnly => dateOnly.ToDateTimeOffset(),
                 DateTime dateTime => dateTime.ToDateTimeOffset(),
                 DateTimeOffset dateTimeOffset => dateTimeOffset,
-                _ => throw new FormatException()
+                // null (an empty date cell — the binding applies its null /
+                // fallback value), UnsetValue, or any other type: clear the
+                // picker. Throwing here surfaced as an unhandled FormatException
+                // that crashed the grid whenever a date field was empty.
+                _ => null
             };
             datePicker.SourceType ??= e.NewValue?.GetType();
             datePicker._deferUpdate = false;
