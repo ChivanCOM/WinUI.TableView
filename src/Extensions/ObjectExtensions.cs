@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -13,23 +15,23 @@ namespace WinUI.TableView.Extensions;
 /// </summary>
 internal static partial class ObjectExtensions
 {
-    // Regex to split property paths into property names and indexers (for cases like e.g. "[2].Foo[0].Bar", where Foo might be a Property that returns an array)
+    // Regex to split binding paths into segments; property names and indexers (for cases like e.g. "[2].Foo[0].Bar", where Foo might be a Property that returns an array)
     [GeneratedRegex(@"([^.[]+)|(\[[^\]]+\])", RegexOptions.Compiled)]
-    private static partial Regex PropertyPathRegex();
+    private static partial Regex BindingPathRegex();
 
     /// <summary>
-    /// Creates and returns a compiled lambda expression for accessing the property path on instances, with runtime type checking and casting support.
+    /// Creates and returns a compiled lambda expression for accessing the binding path on instances, with runtime type checking and casting support.
     /// </summary>
     /// <param name="dataItem">The data item instance to use for runtime type evaluation.</param>
     /// <param name="bindingPath">The binding path to access, e.g. "[0].SubPropertyArray[0].SubSubProperty".</param>
-    /// <returns>A compiled function that takes an instance and returns the property value, or null if the property path is invalid.</returns>
-    internal static Func<object, object?>? GetFuncCompiledPropertyPath(this object dataItem, string bindingPath)
+    /// <returns>A compiled function that takes an instance and returns the property value, or null if the binding path is invalid.</returns>
+    internal static Func<object, object?>? GetCompiledValueGetter(this object dataItem, string bindingPath)
     {
         try
         {
-            // Build the property access expression chain with runtime type checking
+            // Build the value access expression chain with runtime type checking
             var parameterObj = Expression.Parameter(typeof(object), "obj");
-            var expressionTree = BuildPropertyPathExpressionTree(parameterObj, bindingPath, dataItem);
+            var expressionTree = BuildGetterExpressionTree(parameterObj, bindingPath, dataItem);
 
             // Compile the lambda expression
             var lambda = Expression.Lambda<Func<object, object?>>(expressionTree, parameterObj);
@@ -41,63 +43,484 @@ internal static partial class ObjectExtensions
         }
     }
 
+    internal static Action<object, object?>? GetCompiledValueSetter(this object dataItem, string bindingPath)
+    {
+        try
+        {
+            var parameterObj = Expression.Parameter(typeof(object), "obj");
+            var parameterValue = Expression.Parameter(typeof(object), "value");
+
+            var expressionTree = BuildSetterExpressionTree(
+                parameterObj,
+                parameterValue,
+                bindingPath,
+                dataItem);
+
+            var lambda = Expression.Lambda<Action<object, object?>>(
+                expressionTree,
+                parameterObj,
+                parameterValue);
+
+            return lambda.Compile();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static Expression BuildSetterExpressionTree(ParameterExpression parameterObj, ParameterExpression parameterValue, string bindingPath, object dataItem)
+    {
+        var matches = BindingPathRegex().Matches(bindingPath);
+
+        if (matches.Count == 0)
+            throw new ArgumentException("Binding path is empty.", nameof(bindingPath));
+
+        // Reuse the getter's navigation logic to reach the parent of the final segment.
+        // Only the final segment is setter-specific (a write target instead of a read).
+        var current = BuildPathNavigationExpression(parameterObj, matches, dataItem, matches.Count - 1);
+
+        var finalPart = matches[^1].Value;
+
+        return finalPart.StartsWith('[') && finalPart.EndsWith(']')
+            ? BuildIndexerSetterExpression(current, finalPart, parameterValue)
+            : BuildPropertySetterExpression(current, finalPart, parameterValue);
+    }
+
+    private static MemberExpression BuildPropertyGetterExpression(Expression current, string propertyName)
+    {
+        var propertyInfo = current.Type.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            ?? throw new ArgumentException($"Property '{propertyName}' not found on type '{current.Type.Name}'.");
+
+        return Expression.Property(current, propertyInfo);
+    }
+
+    private static Expression BuildIndexerGetterExpression(Expression current, string indexerPart)
+    {
+        var indices = GetIndices(indexerPart[1..^1]);
+
+        if (current.Type.IsArray)
+        {
+            return !indices.All(index => index is int)
+                ? throw new ArgumentException($"Arrays only support integer indexing: {indexerPart}")
+                : (Expression)AddArrayAccessWithBoundsCheck(current, [.. indices.Select(index => (int)index)]);
+        }
+
+        return AddIndexerAccessWithSafetyChecks(current, indices);
+    }
+
+    private static Expression BuildPropertySetterExpression(Expression current, string propertyName, Expression value)
+    {
+        var propertyInfo = current.Type.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+        ?? throw new ArgumentException($"Property '{propertyName}' not found on type '{current.Type.Name}'.");
+
+        if (!propertyInfo.CanWrite)
+            throw new ArgumentException($"Property '{propertyName}' is read-only.");
+
+        var target = Expression.Property(current, propertyInfo);
+
+        return BuildConvertedAssignExpression(target, value, propertyInfo.PropertyType);
+    }
+
+    private static Expression BuildIndexerSetterExpression(Expression current, string indexerPart, Expression value)
+    {
+        var indices = GetIndices(indexerPart[1..^1]);
+
+        return current.Type.IsArray
+            ? BuildArraySetterExpression(current, indices, value)
+            : BuildObjectIndexerSetterExpression(current, indices, value);
+    }
+
+    private static BlockExpression BuildArraySetterExpression(Expression current, object[] indices, Expression value)
+    {
+        if (!indices.All(index => index is int))
+            throw new ArgumentException("Arrays only support integer indexers.");
+
+        var arrayType = current.Type;
+        var elementType = arrayType.GetElementType()!;
+        var rank = arrayType.GetArrayRank();
+
+        if (indices.Length != rank)
+            throw new ArgumentException($"Array rank mismatch. Expected {rank} index(es).");
+
+        var arrayVar = Expression.Parameter(arrayType, "array");
+        var assignArray = Expression.Assign(arrayVar, current);
+
+        var indexExpressions = indices
+            .Cast<int>()
+            .Select(index => Expression.Constant(index))
+            .ToArray();
+
+        Expression? boundsCheck = null;
+
+        var getLengthMethod = typeof(Array).GetMethod(nameof(Array.GetLength))!;
+
+        for (var i = 0; i < indexExpressions.Length; i++)
+        {
+            var index = (int)indices[i];
+
+            if (index < 0)
+                throw new ArgumentOutOfRangeException(nameof(indices));
+
+            var length = Expression.Call(arrayVar, getLengthMethod, Expression.Constant(i));
+            var check = Expression.LessThan(indexExpressions[i], length);
+
+            boundsCheck = boundsCheck is null
+                ? check
+                : Expression.AndAlso(boundsCheck, check);
+        }
+
+        var assignValue = BuildConvertedAssignExpression(
+            Expression.ArrayAccess(arrayVar, indexExpressions),
+            value,
+            elementType);
+
+        return Expression.Block(
+            [arrayVar],
+            assignArray,
+            Expression.IfThen(boundsCheck!, assignValue));
+    }
+
+    private static Expression BuildObjectIndexerSetterExpression(Expression current, object[] indices, Expression value)
+    {
+        if (indices.Length == 1)
+        {
+            var dictionaryInterface = current.Type.GetInterfaces()
+                .FirstOrDefault(i => i.IsGenericType &&
+                                     i.GetGenericTypeDefinition() == typeof(IDictionary<,>));
+
+            if (dictionaryInterface is not null)
+            {
+                var args = dictionaryInterface.GetGenericArguments();
+                var keyType = args[0];
+                var valueType = args[1];
+
+                if (!keyType.IsAssignableFrom(indices[0].GetType()))
+                    return Expression.Empty();
+
+                var indexer = dictionaryInterface.GetProperty("Item")!;
+
+                var target = Expression.Property(Expression.Convert(current, dictionaryInterface),
+                    indexer,
+                    Expression.Constant(indices[0], keyType));
+
+                return BuildConvertedAssignExpression(target, value, valueType);
+            }
+        }
+
+        var indexerTypes = indices.Select(index => index.GetType()).ToArray();
+
+        var indexerProperty = current.Type.GetProperty("Item", indexerTypes)
+            ?? throw new ArgumentException($"Indexer not found on type '{current.Type.Name}'.");
+
+        if (!indexerProperty.CanWrite)
+            throw new ArgumentException($"Indexer on type '{current.Type.Name}' is read-only.");
+
+        var indexExpressions = indices
+            .Select(index => Expression.Constant(index, index.GetType()))
+            .ToArray();
+
+        // Add bounds checking for IList/ICollection types with integer indexers
+        if (indices.Length == 1 && indices[0] is int intIndex)
+        {
+            var listInterface = current.Type.GetInterfaces()
+                .FirstOrDefault(i => i.IsGenericType &&
+                                (i.GetGenericTypeDefinition() == typeof(IList<>) ||
+                                 i.GetGenericTypeDefinition() == typeof(ICollection<>)));
+
+            if (listInterface != null ||
+                typeof(IList).IsAssignableFrom(current.Type) ||
+                typeof(ICollection).IsAssignableFrom(current.Type))
+            {
+                // Count may be declared on a base interface (e.g. IList inherits Count from ICollection),
+                // and reflection does not surface inherited interface members, so search interfaces too.
+                // The container type is no longer specialized to the concrete runtime type during navigation,
+                // so current.Type can legitimately be an interface like IList here.
+                var countProperty = current.Type.GetProperty("Count")
+                    ?? current.Type.GetInterfaces()
+                        .Select(i => i.GetProperty("Count"))
+                        .FirstOrDefault(p => p is not null);
+
+                if (countProperty != null)
+                {
+                    var collectionVar = Expression.Parameter(current.Type, "collection");
+                    var assignCollection = Expression.Assign(collectionVar, current);
+
+                    var countExpr = Expression.Property(collectionVar, countProperty);
+                    var indexExpr = Expression.Constant(intIndex);
+
+                    // Check if index >= 0 && index < Count
+                    var boundsCheck = Expression.AndAlso(
+                        Expression.GreaterThanOrEqual(indexExpr, Expression.Constant(0)),
+                        Expression.LessThan(indexExpr, countExpr));
+
+                    var assignValue = BuildConvertedAssignExpression(
+                        Expression.Property(collectionVar, indexerProperty, indexExpressions),
+                        value,
+                        indexerProperty.PropertyType);
+
+                    return Expression.Block(
+                        [collectionVar],
+                        assignCollection,
+                        Expression.IfThen(boundsCheck, assignValue));
+                }
+            }
+        }
+
+        return BuildConvertedAssignExpression(
+            Expression.Property(current, indexerProperty, indexExpressions),
+            value,
+            indexerProperty.PropertyType);
+    }
+
+    private static BlockExpression BuildConvertedAssignExpression(Expression target, Expression value, Type targetType)
+    {
+        var convertedValue = Expression.Variable(typeof(object), "convertedValue");
+        var error = Expression.Variable(typeof(string), "error");
+
+        var tryConvertMethod = typeof(ObjectExtensions)
+            .GetMethod(
+                nameof(TryConvertValue),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+
+        var tryConvertCall = Expression.Call(
+            tryConvertMethod,
+            value,
+            Expression.Constant(targetType),
+            convertedValue,
+            error);
+
+        return Expression.Block(
+            [convertedValue, error],
+            Expression.IfThen(
+                tryConvertCall,
+                Expression.Assign(
+                    target,
+                    Expression.Convert(convertedValue, targetType))));
+    }
+
+    private static bool TryConvertValue(object? value, Type targetType, out object? convertedValue, out string? error)
+    {
+        if (targetType == typeof(object))
+        {
+            error = null;
+            convertedValue = value;
+            return true;
+        }
+
+        if (value is string || value is null)
+            return TryConvertToTargetType(value as string, targetType, out convertedValue, out error);
+
+        return TryConvertObject(value, targetType, out convertedValue, out error);
+    }
+
+    private static bool TryConvertToTargetType(string? stringValue, Type targetType, out object? convertedValue, out string? error)
+    {
+        error = null;
+        convertedValue = null;
+
+        var underlyingType = Nullable.GetUnderlyingType(targetType);
+        var actualTargetType = underlyingType ?? targetType;
+
+        if (actualTargetType == typeof(string))
+        {
+            convertedValue = stringValue ?? string.Empty;
+            return true;
+        }
+
+        if (stringValue is null)
+        {
+            if (underlyingType is not null || !targetType.IsValueType)
+            {
+                return true;
+            }
+
+            error = $"The target type '{targetType.Name}' does not accept null values.";
+            return false;
+        }
+
+        if (stringValue.Length == 0)
+        {
+            if (underlyingType is not null || !targetType.IsValueType)
+            {
+                return true;
+            }
+
+            error = $"The target type '{targetType.Name}' does not accept empty values.";
+            return false;
+        }
+
+        try
+        {
+            if (actualTargetType == typeof(bool))
+            {
+                if (bool.TryParse(stringValue, out var boolValue))
+                {
+                    convertedValue = boolValue;
+                    return true;
+                }
+
+                if (stringValue == "1" || stringValue.Equals("yes", StringComparison.OrdinalIgnoreCase))
+                {
+                    convertedValue = true;
+                    return true;
+                }
+
+                if (stringValue == "0" || stringValue.Equals("no", StringComparison.OrdinalIgnoreCase))
+                {
+                    convertedValue = false;
+                    return true;
+                }
+            }
+            else if (actualTargetType == typeof(DateOnly))
+            {
+                convertedValue = DateOnly.Parse(stringValue, CultureInfo.CurrentCulture);
+                return true;
+            }
+            else if (actualTargetType == typeof(TimeOnly))
+            {
+                convertedValue = TimeOnly.Parse(stringValue, CultureInfo.CurrentCulture);
+                return true;
+            }
+            else if (actualTargetType == typeof(DateTime))
+            {
+                convertedValue = DateTime.Parse(stringValue, CultureInfo.CurrentCulture);
+                return true;
+            }
+            else if (actualTargetType == typeof(DateTimeOffset))
+            {
+                convertedValue = DateTimeOffset.Parse(stringValue, CultureInfo.CurrentCulture);
+                return true;
+            }
+            else if (actualTargetType == typeof(TimeSpan))
+            {
+                convertedValue = TimeSpan.Parse(stringValue, CultureInfo.CurrentCulture);
+                return true;
+            }
+            else if (actualTargetType == typeof(Guid))
+            {
+                convertedValue = Guid.Parse(stringValue);
+                return true;
+            }
+            else if (actualTargetType == typeof(Uri))
+            {
+                convertedValue = new Uri(stringValue, UriKind.RelativeOrAbsolute);
+                return true;
+            }
+            else if (actualTargetType.IsEnum)
+            {
+                convertedValue = Enum.Parse(actualTargetType, stringValue, ignoreCase: true);
+                return true;
+            }
+
+            var converter = TypeDescriptor.GetConverter(actualTargetType);
+            if (converter.CanConvertFrom(typeof(string)))
+            {
+                convertedValue = converter.ConvertFrom(null, CultureInfo.CurrentCulture, stringValue);
+                return true;
+            }
+
+            convertedValue = Convert.ChangeType(stringValue, actualTargetType, CultureInfo.CurrentCulture);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"Unable to convert '{stringValue}' to '{actualTargetType.Name}': {ex.Message}";
+            return false;
+        }
+    }
+
+    private static bool TryConvertObject(object? value, Type targetType, out object? convertedValue, out string? error)
+    {
+        error = null;
+        convertedValue = null;
+
+        if (value is null)
+        {
+            if (!targetType.IsValueType || Nullable.GetUnderlyingType(targetType) is not null)
+            {
+                return true;
+            }
+
+            error = $"The target type '{targetType.Name}' does not accept null values.";
+            return false;
+        }
+
+        var actualTargetType = Nullable.GetUnderlyingType(targetType) ?? targetType;
+        if (actualTargetType.IsInstanceOfType(value))
+        {
+            convertedValue = value;
+            return true;
+        }
+
+        try
+        {
+            convertedValue = Convert.ChangeType(value, actualTargetType, CultureInfo.CurrentCulture);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"Unable to convert '{value}' to '{actualTargetType.Name}': {ex.Message}";
+            return false;
+        }
+    }
+
     /// <summary>
-    /// Builds an expression tree for accessing a property path on the given instance expression, with runtime type checking and casting support.
+    /// Builds an expression tree for accessing a binding path on the given instance expression, with runtime type checking and casting support.
     /// </summary>
     /// <param name="parameterObj">The expression representing the instance parameter for which the binding path will be evaluated.</param>
     /// <param name="bindingPath">The binding path to access.</param>
     /// <param name="dataItem">The actual data item to use for runtime type evaluation, to help with any needed subclass type conversions.</param>
-    /// <returns>An expression that accesses the property value specified by the binding path for the provided dataItem instance.</returns>
-    private static Expression BuildPropertyPathExpressionTree(ParameterExpression parameterObj, string bindingPath, object dataItem)
+    /// <returns>An expression that gets the value specified by the binding path for the provided dataItem instance.</returns>
+    private static Expression BuildGetterExpressionTree(ParameterExpression parameterObj, string bindingPath, object dataItem)
+    {
+        var matches = BindingPathRegex().Matches(bindingPath);
+
+        // Navigate through every segment to reach the final value.
+        var current = BuildPathNavigationExpression(parameterObj, matches, dataItem, matches.Count);
+
+        return EnsureObjectCompatibleResult(current);
+    }
+
+    /// <summary>
+    /// Builds the expression that navigates the first <paramref name="navigateCount"/> segments of a binding path on
+    /// the given instance expression, with runtime null-checks and mixed-collection-friendly type specialization.
+    /// Shared by both the getter (which navigates every segment) and the setter (which navigates to the parent of the
+    /// final segment), so the navigation logic only lives in one place.
+    /// </summary>
+    /// <param name="parameterObj">The expression representing the instance parameter for which the binding path will be evaluated.</param>
+    /// <param name="matches">The parsed binding path segments.</param>
+    /// <param name="dataItem">The actual data item to use for runtime type evaluation, to help with any needed subclass type conversions.</param>
+    /// <param name="navigateCount">The number of leading segments to navigate into.</param>
+    /// <returns>An expression that accesses the value at the requested depth for the provided dataItem instance.</returns>
+    private static Expression BuildPathNavigationExpression(ParameterExpression parameterObj, MatchCollection matches, object dataItem, int navigateCount)
     {
         Expression current = parameterObj;
 
         // The function uses a generic object input parameter to allow for any type of data item,
-        // but we need to ensure that the runtime type matches the data item type that is inputted as example to be able to find members
+        // but we cast only to the root type that actually declares the first path segment.
+        // This keeps the accessor compatible with sibling subclasses in mixed collections.
         {
-            var typeActual = dataItem.GetType();
-            if (current.Type != typeActual && !typeActual.IsValueType)
-                current = Expression.Convert(current, dataItem.GetType());
+            var t = dataItem.GetType();
+            // Resolve the declaring type for the first segment (property or indexer).
+            // If we cannot resolve it, keep the original runtime type as fallback.
+            var typeRoot = matches.Count > 0 ? GetDeclaringTypeForPathSegment(t, matches[0].Value) ?? t : t;
+            if (current.Type != typeRoot && !typeRoot.IsValueType)
+                current = Expression.Convert(current, typeRoot);
         }
 
-        var matches = PropertyPathRegex().Matches(bindingPath);
-
-        foreach (Match match in matches)
+        for (var matchIndex = 0; matchIndex < navigateCount; matchIndex++)
         {
-            string part = match.Value;
-            Expression nextPropertyAccess;
+            var part = matches[matchIndex].Value;
 
-            // Indexer
-            if (part.StartsWith('[') && part.EndsWith(']'))
+            var nextSegmentAccess = part.StartsWith('[') && part.EndsWith(']')
+                ? BuildIndexerGetterExpression(current, part)
+                : BuildPropertyGetterExpression(current, part);
+
+            if (nextSegmentAccess.Type.IsValueType && !nextSegmentAccess.Type.IsNullableType())
             {
-                object[] indices = GetIndices(part[1..^1]);
-
-                if (current.Type.IsArray)
-                {
-                    // Arrays only support integer indexing
-                    if (!indices.All(idx => idx is int))
-                        throw new ArgumentException($"Arrays only support integer indexing, not the provided indexer [{part[1..^1]}]");
-
-                    nextPropertyAccess = AddArrayAccessWithBoundsCheck(current, [.. indices.Select(index => (int)index)]);
-                }
-                else
-                {
-                    nextPropertyAccess = AddIndexerAccessWithSafetyChecks(current, indices);
-                }
-            }
-            // Simple property access
-            else
-            {
-                var propertyInfo = current.Type.GetProperty(part, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                    ?? throw new ArgumentException($"Property '{part}' not found on type '{current.Type.Name}'");
-
-                nextPropertyAccess = Expression.Property(current, propertyInfo);
-            }
-
-            if (nextPropertyAccess.Type.IsValueType && !nextPropertyAccess.Type.IsNullableType())
-            {
-                // Value types cannot be null, so don't need to check for null, and we can directly assign the property access
-                current = nextPropertyAccess;
+                // Value types cannot be null, so don't need to check for null, and we can directly assign the access to the next segment
+                current = nextSegmentAccess;
             }
             else
             {
@@ -105,31 +528,38 @@ internal static partial class ObjectExtensions
                 var notNullCheck = Expression.NotEqual(current, Expression.Constant(null));
                 current = Expression.Condition(
                     notNullCheck,
-                    nextPropertyAccess,
-                    Expression.Constant(null, nextPropertyAccess.Type)
+                    nextSegmentAccess,
+                    Expression.Constant(null, nextSegmentAccess.Type)
                 );
             }
 
-            // Only check for type compatibility (i.e.: the need for conversion) if this is not the last match
-            if (match != matches[^1])
+            // Only check for type compatibility (i.e.: the need for conversion) if there is a following segment.
+            // We only specialize when the expression type is still object, to avoid over-specializing
+            // to a sample instance subtype and breaking mixed type rows.
+            if (matchIndex + 1 < matches.Count && current.Type == typeof(object))
             {
-                // Compile a lambda of the partial expression thus far (cast to object), to see if we need to add a cast
                 var lambdaTemp = Expression.Lambda<Func<object, object?>>(EnsureObjectCompatibleResult(current), parameterObj);
                 var funcCurrent = lambdaTemp.Compile();
-                // Evaluate this compiled function, to see if the result type is more specific than the current expression type. If so, cast to it
                 var result = funcCurrent(dataItem);
-                var typeResult = result?.GetType() ?? current.Type;
 
-                if (current.Type != typeResult)
+                // The partial result gives us the runtime container for the NEXT segment.
+                // Convert to the most general declaring type for that next segment (property/indexer)
+                // instead of converting directly to the concrete runtime subtype.
+                var typeResult = result?.GetType();
+                if (typeResult != null)
                 {
-                    // Note that we do not need to check for null before we convert, as the null check is already done in the previous condition
-                    // So, we can safely convert the expression to the result type, even for value types (without the null check, a conversion of null to e.g. an int would result in a NullException being thrown)
-                    current = Expression.Convert(current, typeResult);
+                    var nextPart = matches[matchIndex + 1].Value;
+                    var typeCompatible = GetDeclaringTypeForPathSegment(typeResult, nextPart) ?? typeResult;
+
+                    if (current.Type != typeCompatible)
+                    {
+                        current = Expression.Convert(current, typeCompatible);
+                    }
                 }
             }
         }
 
-        return EnsureObjectCompatibleResult(current);
+        return current;
     }
 
     private static Expression EnsureObjectCompatibleResult(Expression expression)
@@ -138,6 +568,48 @@ internal static partial class ObjectExtensions
         if (expression.Type.IsValueType)
             return Expression.Convert(expression, typeof(object));
         return expression;
+    }
+
+    /// <summary>
+    /// Resolves the declaring type for one binding-path segment on the provided candidate type.
+    /// </summary>
+    /// <param name="candidateType">The type on which the segment should be resolved.</param>
+    /// <param name="segment">One binding path segment, either a property name or an indexer token like "[0]".</param>
+    /// <returns>The segment declaring type when resolved; otherwise <see langword="null"/>.</returns>
+    private static Type? GetDeclaringTypeForPathSegment(Type candidateType, string segment)
+    {
+        if (string.IsNullOrWhiteSpace(segment))
+            return null;
+
+        // Indexer segment
+        if (segment.StartsWith('[') && segment.EndsWith(']'))
+        {
+            // Infer CLR argument types from parsed index values.
+            var indices = GetIndices(segment[1..^1]);
+            var indexTypes = indices.Select(i => i.GetType()).ToArray();
+
+            // Find an indexer whose parameter list is assignment-compatible with parsed index types.
+            // GetProperties includes inherited members, so we can resolve indexers declared on a base class as well.
+            var indexerInfo = candidateType
+                .GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .Where(p => p.GetIndexParameters().Length == indexTypes.Length)
+                .FirstOrDefault(p =>
+                {
+                    var indexParameters = p.GetIndexParameters();
+                    for (var i = 0; i < indexParameters.Length; i++)
+                    {
+                        if (!indexParameters[i].ParameterType.IsAssignableFrom(indexTypes[i]))
+                            return false;
+                    }
+                    return true;
+                });
+
+            return indexerInfo?.DeclaringType;
+        }
+
+        // Property segment
+        var propertyInfo = candidateType.GetProperty(segment, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        return propertyInfo?.DeclaringType;
     }
 
     /// <summary>

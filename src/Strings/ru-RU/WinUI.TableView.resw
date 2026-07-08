@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <root>
   <!-- 
     Microsoft ResX Schema 
@@ -179,5 +179,14 @@
   </data>
   <data name="Copy" xml:space="preserve">
     <value>Копировать</value>
+  </data>
+  <data name="Paste" xml:space="preserve">
+    <value>Вставить</value>
+  </data>
+  <data name="PasteCommandDescription" xml:space="preserve">
+    <value>Вставить содержимое буфера обмена в ячейки.</value>
+  </data>
+  <data name="Filtered" xml:space="preserve">
+    <value>Отфильтровано</value>
   </data>
 </root>

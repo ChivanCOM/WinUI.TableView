@@ -1,43 +1,34 @@
-using Microsoft.UI.Dispatching;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
-using Windows.UI.ViewManagement;
-using WinUI.TableView.SampleApp.Helpers;
 using WinUI.TableView.SampleApp.Pages;
+
+// To learn more about WinUI, the WinUI project structure,
+// and more about our project templates, see: http://aka.ms/winui-project-info.
 
 namespace WinUI.TableView.SampleApp;
 
-public sealed partial class MainPage : Page
+public sealed partial class MainWindow : Window
 {
-    private readonly DispatcherQueue _dispatcherQueue;
-    private readonly UISettings _settings = new();
     private bool _canNavigate = true;
 
-    public MainPage()
+    public MainWindow()
     {
         InitializeComponent();
 
-        App.Current.MainWindow.Activated += OnMainWindowActivated;
-        App.Current.MainWindow.SetTitleBar(AppTitleBar);
-
-        _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
-        _settings.ColorValuesChanged += delegate { OnSettingsColorValuesChanged(); };
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
+        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        AppWindow.SetIcon("Assets/TableView.ico");
     }
 
-    private async void OnPageLoaded(object sender, RoutedEventArgs e)
+    private async void RootGridLoaded(object sender, RoutedEventArgs e)
     {
-        OnSettingsColorValuesChanged();
-
         await ExampleViewModel.InitializeItemsAsync();
 
         SetLoading(false);
-
-#if DEBUG
-        navigationView.SelectedItem = navigationView.MenuItems[2];
-#else
         navigationView.SelectedItem = overViewNavItem;
-#endif
     }
 
     internal void SetLoading(bool isLoading)
@@ -45,45 +36,9 @@ public sealed partial class MainPage : Page
         loadingIndicator.Visibility = isLoading ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void OnMainWindowActivated(object sender, WindowActivatedEventArgs args)
+    private void TitleBar_PaneToggleRequested(TitleBar sender, object args)
     {
-#if WINDOWS
-        if (args.WindowActivationState == WindowActivationState.Deactivated)
-        {
-            VisualStateManager.GoToState(this, "Deactivated", true);
-        }
-        else
-        {
-            VisualStateManager.GoToState(this, "Activated", true);
-        }
-#endif
-    }
-
-    private void OnPaneDisplayModeChanged(NavigationView sender, NavigationViewDisplayModeChangedEventArgs args)
-    {
-        if (sender.PaneDisplayMode == NavigationViewPaneDisplayMode.Top)
-        {
-            VisualStateManager.GoToState(this, "Top", true);
-        }
-        else
-        {
-            if (args.DisplayMode == NavigationViewDisplayMode.Minimal)
-            {
-                VisualStateManager.GoToState(this, "Compact", true);
-            }
-            else
-            {
-                VisualStateManager.GoToState(this, "Default", true);
-            }
-        }
-    }
-
-    // this handles updating the caption button colors correctly when windows system theme is changed
-    // while the app is open
-    private void OnSettingsColorValuesChanged()
-    {
-        // This calls comes off-thread, hence we will need to dispatch it to current app's thread
-        _dispatcherQueue.TryEnqueue(() => TitleBarHelper.ApplySystemThemeToCaptionButtons(App.Current.MainWindow));
+        navigationView.IsPaneOpen = !navigationView.IsPaneOpen;
     }
 
     private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -109,12 +64,14 @@ public sealed partial class MainPage : Page
                 "Filtering" => typeof(FilteringPage),
                 "Customize Filter Flyout" => typeof(CustomizeFilterPage),
                 "External Filtering" => typeof(ExternalFilteringPage),
+                "Clipboard Actions" => typeof(ClipboardActionsPage),
                 "Editing" => typeof(EditingPage),
                 "Sorting" => typeof(SortingPage),
                 "Custom Sorting" => typeof(CustomizeSortingPage),
                 "Data Export" => typeof(ExportPage),
                 "Large Dataset" => typeof(LargeDataPage),
                 "Conditional Cell Styling" => typeof(ConditionalStylingPage),
+                "Column Sizing" => typeof(ColumnSizingPage),
                 _ => typeof(BlankPage)
             };
 
@@ -122,7 +79,7 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void OnBackRequested(NavigationView sender, NavigationViewBackRequestedEventArgs args)
+    private void OnBackRequested(TitleBar sender, object args)
     {
         if (rootFrame.CanGoBack)
         {
@@ -139,12 +96,18 @@ public sealed partial class MainPage : Page
             navigationView.SelectedItem = navItem;
         }
 
-        if (e.Content is Page { DataContext: null } page)
+        if (e.Content is Page page)
         {
-            await Task.Delay(10);
-            page.DataContext = new ExampleViewModel();
+            page.NavigationCacheMode = NavigationCacheMode.Disabled;
+
+            if (page.DataContext is null)
+            {
+                await Task.Delay(10);
+                page.DataContext = new ExampleViewModel();
+            }
         }
 
         _canNavigate = true;
     }
+
 }

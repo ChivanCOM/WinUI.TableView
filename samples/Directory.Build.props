@@ -1,11 +1,8 @@
 <Project>
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
   <PropertyGroup>
-    <NetVersion>net10.0</NetVersion>
     <LangVersion>preview</LangVersion>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
     <RootNamespace>WinUI.TableView.SampleApp</RootNamespace>
-    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
 
     <!--
       Adding NoWarn to remove build warnings

@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Data;
@@ -32,8 +33,6 @@ public partial class TableViewRow : ListViewItem
     private Thickness _focusVisualMargin = new(1);
     private readonly Thickness _selectionBackgroundMargin = new(4, 2, 4, 2);
     private readonly Thickness _selectionIndicatorMargin = new(4, 0, 0, 0);
-
-    private TableView? _tableView;
     private ListViewItemPresenter? _itemPresenter;
     private Border? _selectionBackground;
     private bool _ensureCells = true;
@@ -72,6 +71,13 @@ public partial class TableViewRow : ListViewItem
     {
         if (!e.TryGetPosition(sender, out var position)) return;
 #endif
+
+        // Select the row before showing the Context Menu
+        if (TableView is not null && TableView.ForceRowOrCellSelectionOnContextRequested && !IsSelected)
+        {
+            TableView.MakeSelection(new TableViewCellSlot(Index, -1), false);
+        }
+
         e.Handled = TableView?.ShowRowContext(this, position) is true;
     }
 
@@ -147,7 +153,7 @@ public partial class TableViewRow : ListViewItem
         }
 
         RowPresenter?.InvalidateMeasure(); // The cells presenter does not measure every time.
-        _tableView?.EnsureAlternateRowColors();
+        TableView?.EnsureAlternateRowColors();
     }
 
     /// <inheritdoc/>
@@ -181,7 +187,7 @@ public partial class TableViewRow : ListViewItem
     {
         base.OnTapped(e);
 
-        if (TableView?.SelectionUnit is TableViewSelectionUnit.Row or TableViewSelectionUnit.CellOrRow)
+        if (TableView?.SelectionUnit is TableViewSelectionUnit.Row or TableViewSelectionUnit.CellOrRow or TableViewSelectionUnit.CellWithRow)
         {
             TableView.CurrentRowIndex = Index;
             TableView.LastSelectionUnit = TableViewSelectionUnit.Row;
@@ -627,13 +633,13 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     public TableView? TableView
     {
-        get => _tableView;
+        get;
         internal set
         {
-            if (_tableView != value)
+            if (field != value)
             {
                 OnTableViewChanging();
-                _tableView = value;
+                field = value;
                 OnTableViewChanged();
             }
         }
@@ -646,4 +652,10 @@ public partial class TableViewRow : ListViewItem
 #else
     { get; private set; }
 #endif
+
+    /// <inheritdoc/>
+    protected override AutomationPeer OnCreateAutomationPeer()
+    {
+        return new AutomationPeers.TableViewRowAutomationPeer(this);
+    }
 }

@@ -5,7 +5,7 @@
       net9.0;
       net10.0;
     </TargetFrameworks>
-    <LangVersion>12</LangVersion>
+    <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <IsAOTCompatible>true</IsAOTCompatible>
     <!--
@@ -35,7 +35,7 @@
     </TargetFrameworks>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$([MSBuild]::GetTargetPlatformIdentifier($(TargetFramework)))' == 'windows'">
+  <PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier($(TargetFramework))) == 'windows'">
     <UseWinUI>true</UseWinUI>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <WindowsSdkPackageVersion>10.0.19041.56</WindowsSdkPackageVersion>
@@ -48,12 +48,11 @@
   </ItemGroup>
 
   <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) != 'windows'">
-    <PackageReference Include="Uno.WinUI" Version="6.2.87" />
+    <PackageReference Include="Uno.WinUI" />
   </ItemGroup>
   
   <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250108002" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" />
   </ItemGroup>
   
   <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) != 'windows'">
@@ -64,11 +63,11 @@
     <PRIResource Include="**\*.resw" Exclude="bin\**\*.resw;obj\**\*.resw" />
   </ItemGroup>
 
-	<ItemGroup>
-		<Compile Update="TableView.*.cs">
-			<DependentUpon>TableView.cs</DependentUpon>
-		</Compile>
-	</ItemGroup>
+    <ItemGroup>
+        <Compile Update="TableView.*.cs">
+            <DependentUpon>TableView.cs</DependentUpon>
+        </Compile>
+    </ItemGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <PackageId>WinUI.TableView</PackageId>
@@ -91,7 +90,7 @@
   </PropertyGroup>
 
   <ItemGroup Condition="'$(Configuration)' == 'Release'">
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1">
+    <PackageReference Include="Microsoft.SourceLink.GitHub">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
     </PackageReference>

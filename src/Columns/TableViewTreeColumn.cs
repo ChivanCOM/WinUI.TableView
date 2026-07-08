@@ -12,6 +12,10 @@ namespace WinUI.TableView;
 /// and the bound text. Pair the TableView's ItemsSource with
 /// <see cref="TreeGridFlattener{T}"/> so toggling the chevron shows/hides descendants.
 ///
+/// Everything in the generated cell is binding-driven off the cell's DataContext —
+/// containers are recycled across items, so nothing may be captured per item
+/// (a pinned DataContext or a captured row reference goes stale on recycle).
+///
 /// Optional glyph: set <see cref="GlyphBinding"/> (and <see cref="GlyphFontFamily"/>)
 /// to render an icon between the chevron and the text;
 /// <see cref="GlyphForegroundBinding"/> colors it per row.
@@ -37,24 +41,34 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
     /// <inheritdoc/>
     public override FrameworkElement GenerateElement(TableViewCell cell, object? dataItem)
     {
-        var row = dataItem as ITreeGridRow;
-
         var panel = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             Spacing = 6,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(4 + IndentPerLevel * (row?.Depth ?? 0), 0, 12, 0),
         };
+        // Indent follows the (recycled) DataContext, not the item the cell was created for.
+        panel.SetBinding(FrameworkElement.MarginProperty, new Binding
+        {
+            Path = new PropertyPath(nameof(ITreeGridRow.Depth)),
+            Converter = DepthToIndentConverter.Instance,
+        });
 
-        // A real Button: TableViewCell handles pointer events for selection/edit, which
-        // swallows Tapped on plain elements — Click still gets through.
         var chevronText = new TextBlock
         {
             FontSize = 10,
             VerticalAlignment = VerticalAlignment.Center,
             TextAlignment = Microsoft.UI.Xaml.TextAlignment.Center,
         };
+        chevronText.SetBinding(TextBlock.TextProperty, new Binding
+        {
+            Path = new PropertyPath(nameof(ITreeGridRow.IsExpanded)),
+            Converter = ChevronGlyphConverter.Instance,
+        });
+
+        // A real Button: TableViewCell handles pointer events for selection/edit, which
+        // swallows Tapped on plain elements — Click still gets through. The handler reads
+        // the DataContext at click time so recycling can't leave it pointing at an old row.
         var chevron = new Button
         {
             Content = chevronText,
@@ -67,19 +81,22 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             VerticalAlignment = VerticalAlignment.Stretch,
             IsTabStop = false,
         };
-        if (row?.HasChildren == true)
+        chevron.SetBinding(UIElement.OpacityProperty, new Binding
         {
-            chevronText.SetBinding(TextBlock.TextProperty, new Binding
+            Path = new PropertyPath(nameof(ITreeGridRow.HasChildren)),
+            Converter = HasChildrenToOpacityConverter.Instance,
+        });
+        chevron.SetBinding(Control.IsEnabledProperty, new Binding
+        {
+            Path = new PropertyPath(nameof(ITreeGridRow.HasChildren)),
+        });
+        chevron.Click += (s, _) =>
+        {
+            if ((s as FrameworkElement)?.DataContext is ITreeGridRow row && row.HasChildren)
             {
-                Path = new PropertyPath(nameof(ITreeGridRow.IsExpanded)),
-                Converter = ChevronGlyphConverter.Instance,
-            });
-            chevron.Click += (_, _) => row.IsExpanded = !row.IsExpanded;
-        }
-        else
-        {
-            chevron.IsHitTestVisible = false;
-        }
+                row.IsExpanded = !row.IsExpanded;
+            }
+        };
         panel.Children.Add(chevron);
 
         if (GlyphBinding is not null)
@@ -105,9 +122,6 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         text.SetBinding(TextBlock.TextProperty, Binding);
         panel.Children.Add(text);
 
-#if !WINDOWS
-        panel.DataContext = dataItem;
-#endif
         return panel;
     }
 
@@ -120,7 +134,29 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         public static readonly ChevronGlyphConverter Instance = new();
 
         public object Convert(object value, Type targetType, object parameter, string language)
-            => value is true ? "▾" : "▸"; // ▾ / ▸
+            => value is true ? "▾" : "▸";
+
+        public object ConvertBack(object value, Type targetType, object parameter, string language)
+            => throw new NotSupportedException();
+    }
+
+    private sealed partial class DepthToIndentConverter : IValueConverter
+    {
+        public static readonly DepthToIndentConverter Instance = new();
+
+        public object Convert(object value, Type targetType, object parameter, string language)
+            => new Thickness(4 + IndentPerLevel * (value is int depth ? depth : 0), 0, 12, 0);
+
+        public object ConvertBack(object value, Type targetType, object parameter, string language)
+            => throw new NotSupportedException();
+    }
+
+    private sealed partial class HasChildrenToOpacityConverter : IValueConverter
+    {
+        public static readonly HasChildrenToOpacityConverter Instance = new();
+
+        public object Convert(object value, Type targetType, object parameter, string language)
+            => value is true ? 1d : 0d;
 
         public object ConvertBack(object value, Type targetType, object parameter, string language)
             => throw new NotSupportedException();

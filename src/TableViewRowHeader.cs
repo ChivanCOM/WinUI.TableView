@@ -1,4 +1,5 @@
 ﻿using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using System;
 using Windows.Foundation;
@@ -130,4 +131,10 @@ public partial class TableViewRowHeader : ContentControl
     /// Gets or sets the TableView associated with the presenter.
     /// </summary>
     public TableViewRow? TableViewRow { get; internal set; }
+
+    /// <inheritdoc/>
+    protected override AutomationPeer OnCreateAutomationPeer()
+    {
+        return new AutomationPeers.TableViewRowHeaderAutomationPeer(this);
+    }
 }

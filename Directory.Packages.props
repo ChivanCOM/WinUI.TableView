@@ -1,0 +1,23 @@
+<Project ToolsVersion="15.0">
+  <ItemGroup>
+    <PackageVersion Include="ClosedXML" Version="0.105.0" />
+    <PackageVersion Include="ColorCode.WinUI" Version="2.0.15" />
+    <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageVersion Include="CommunityToolkit.WinUI.Controls.ColorPicker" Version="8.1.240916" />
+    <PackageVersion Include="CommunityToolkit.WinUI.Controls.SettingsControls" Version="8.1.240916" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Debug" Version="9.0.4" />
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="1.1.1" />
+    <PackageVersion Include="Microsoft.TestPlatform.TestHost" Version="17.14.1" />
+    <PackageVersion Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.4.0" />
+    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
+    <PackageVersion Include="Microsoft.WindowsAppSDK.WinUI" Version="1.8.260528001" />
+    <PackageVersion Include="MSTest.TestAdapter" Version="3.9.3" />
+    <PackageVersion Include="MSTest.TestFramework" Version="3.9.3" />
+    <PackageVersion Include="Uno.WinUI" Version="6.2.87" Condition="$([MSBuild]::VersionLessThan($([MSBuild]::GetTargetFrameworkVersion('$(TargetFramework)')), 'v9.0'))" />
+    <!-- FOBO fork: pinned to the Uno.WinUI that Uno.Sdk 6.5.31 resolves (6.5.153) — the
+         consuming apps (DataMaker, Music Detective) are on that SDK, and a higher version
+         here turns into an NU1605 downgrade error in every consumer. Bump together with
+         the apps' global.json. Upstream had 6.5.237. -->
+    <PackageVersion Include="Uno.WinUI" Version="6.5.153" Condition="!$([MSBuild]::VersionLessThan($([MSBuild]::GetTargetFrameworkVersion('$(TargetFramework)')), 'v9.0'))" />
+  </ItemGroup>
+</Project>

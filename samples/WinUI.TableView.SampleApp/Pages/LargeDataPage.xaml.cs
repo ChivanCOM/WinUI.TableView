@@ -14,17 +14,27 @@ public sealed partial class LargeDataPage : Page
     {
         if (TransactionsViewModel.TransacationsList?.Count > 0) return;
 
-        App.Current.MainPage.SetLoading(true);
+        App.Current.MainWindow.SetLoading(true);
         await TransactionsViewModel.InitializeItemsAsync();
-        App.Current.MainPage.SetLoading(false);
+        App.Current.MainWindow.SetLoading(false);
     }
 
     private void OnSetItemsSourceCliced(object sender, RoutedEventArgs e)
     {
         if (DataContext is TransactionsViewModel viewModel)
         {
-            viewModel.TransacationsData = [.. TransactionsViewModel.TransacationsList];
+            viewModel.TransacationsData = TransactionsViewModel.TransacationsList;
             ((Button)sender).IsEnabled = false;
         }
+    }
+
+    private void OnPageUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is TransactionsViewModel viewModel)
+        {
+            viewModel.TransacationsData = null;
+        }
+
+        TransactionsViewModel.ReleaseItems();
     }
 }

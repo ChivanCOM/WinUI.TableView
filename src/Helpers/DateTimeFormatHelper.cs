@@ -88,6 +88,21 @@ internal static class DateTimeFormatHelper
              formatter.Calendar,
              strClock ?? formatter.Clock);
 
+#if !WINDOWS
+        if (strFormat is "shorttime")
+        {
+            var longDateFormat = new DateTimeFormatter("longdate").Patterns[0];
+            var timeFormat = result.Patterns[0].Replace(longDateFormat, "").Trim();
+
+            result = new DateTimeFormatter(
+             timeFormat,
+             formatter.Languages,
+             formatter.GeographicRegion,
+             formatter.Calendar,
+             strClock ?? formatter.Clock);
+        }
+#endif
+
         _formatters[(strFormat, strClock)] = result;
 
         return result;

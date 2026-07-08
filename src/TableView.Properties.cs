@@ -222,6 +222,11 @@ public partial class TableView
     public static readonly DependencyProperty RowHeaderTemplateSelectorProperty = DependencyProperty.Register(nameof(RowHeaderTemplateSelector), typeof(DataTemplateSelector), typeof(TableView), new PropertyMetadata(null, OnRowHeaderTemplateChanged));
 
     /// <summary>
+    /// Identifies the ColumnAutoWidthMode dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ColumnAutoWidthModeProperty = DependencyProperty.Register(nameof(ColumnAutoWidthMode), typeof(TableViewColumnAutoWidthMode), typeof(TableView), new PropertyMetadata(TableViewColumnAutoWidthMode.Both, OnColumnAutoWidthModeChanged));
+
+    /// <summary>
     /// Identifies the FrozenColumnCount dependency property.
     /// </summary>
     public static readonly DependencyProperty FrozenColumnCountProperty = DependencyProperty.Register(nameof(FrozenColumnCount), typeof(int), typeof(TableView), new PropertyMetadata(0, OnFrozenColumnCountChanged));
@@ -265,6 +270,45 @@ public partial class TableView
     /// Identifies the <see cref="ShowFilterItemsCount"/> dependency property.
     /// </summary>
     public static readonly DependencyProperty ShowFilterItemsCountProperty = DependencyProperty.Register(nameof(ShowFilterItemsCount), typeof(bool), typeof(TableView), new PropertyMetadata(false));
+
+
+    /// <summary>
+    /// Identifies the <see cref="ForceRowOrCellSelectionOnContextRequested"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ForceRowOrCellSelectionOnContextRequestedProperty = DependencyProperty.Register(nameof(ForceRowOrCellSelectionOnContextRequested), typeof(bool), typeof(TableView), new PropertyMetadata(false));
+
+    /// <summary>
+    /// Identifies the <see cref="CanCopy"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty CanCopyProperty = DependencyProperty.Register(nameof(CanCopy), typeof(bool), typeof(TableView), new PropertyMetadata(true));
+
+    /// <summary>
+    /// Identifies the <see cref="CanPaste"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty CanPasteProperty = DependencyProperty.Register(nameof(CanPaste), typeof(bool), typeof(TableView), new PropertyMetadata(true));
+
+    /// <summary>
+    /// Gets or sets a value that indicates whether users can copy selected cells or rows to the clipboard.
+    /// </summary>
+    public bool CanCopy
+    {
+        get => (bool)GetValue(CanCopyProperty);
+        set => SetValue(CanCopyProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets a value that indicates whether users can paste clipboard data into the TableView.
+    /// </summary>
+    public bool CanPaste
+    {
+        get => (bool)GetValue(CanPasteProperty);
+        set => SetValue(CanPasteProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the <see cref="ShowDragRectangle"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ShowDragRectangleProperty = DependencyProperty.Register(nameof(ShowDragRectangle), typeof(bool), typeof(TableView), new PropertyMetadata(true, OnShowDragRectangleChanged));
 
     /// <summary>
     /// Gets or sets a value indicating whether opening the column filter over header right-click is enabled.
@@ -332,6 +376,24 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets a value indicating whether the drag selection rectangle is shown during cell drag selection.
+    /// </summary>
+    public bool ShowDragRectangle
+    {
+        get => (bool)GetValue(ShowDragRectangleProperty);
+        set => SetValue(ShowDragRectangleProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets a value that indicates whether the TableView should force select the Row or Cell depending on the SelectionUnit
+    /// </summary>
+    public bool ForceRowOrCellSelectionOnContextRequested
+    {
+        get => (bool)GetValue(ForceRowOrCellSelectionOnContextRequestedProperty);
+        set => SetValue(ForceRowOrCellSelectionOnContextRequestedProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets the selection start cell slot.
     /// </summary>
     internal TableViewCellSlot? SelectionStartCellSlot { get; set; }
@@ -360,6 +422,16 @@ public partial class TableView
     /// Gets or sets a value indicating whether the TableView is in editing mode.
     /// </summary>
     internal bool IsEditing { get; private set; }
+
+    /// <summary>
+    /// Gets the canvas that hosts the drag selection rectangle.
+    /// </summary>
+    internal Canvas? DragRectangleCanvas { get; private set; }
+
+    /// <summary>
+    /// Gets a value indicating whether a drag selection is currently in progress.
+    /// </summary>
+    internal bool IsDragSelecting { get; private set; }
 
     /// <summary>
     /// Gets the visibility states of details pane for each item.
@@ -719,10 +791,19 @@ public partial class TableView
     /// <summary>
     /// Gets or sets the data template selector for the row header.
     /// </summary>
-    public DataTemplateSelector RowHeaderTemplateSelector
+    public DataTemplateSelector? RowHeaderTemplateSelector
     {
-        get => (DataTemplateSelector)GetValue(RowHeaderTemplateSelectorProperty);
+        get => (DataTemplateSelector?)GetValue(RowHeaderTemplateSelectorProperty);
         set => SetValue(RowHeaderTemplateSelectorProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets the ColumnAutoWidthMode for all columns.
+    /// </summary>
+    public TableViewColumnAutoWidthMode ColumnAutoWidthMode
+    {
+        get => (TableViewColumnAutoWidthMode)GetValue(ColumnAutoWidthModeProperty);
+        set => SetValue(ColumnAutoWidthModeProperty, value);
     }
 
     /// <summary>
@@ -755,9 +836,9 @@ public partial class TableView
     /// <summary>
     /// Gets or sets the data template selector for the row details.
     /// </summary>
-    public DataTemplateSelector RowDetailsTemplateSelector
+    public DataTemplateSelector? RowDetailsTemplateSelector
     {
-        get => (DataTemplateSelector)GetValue(RowDetailsTemplateSelectorProperty);
+        get => (DataTemplateSelector?)GetValue(RowDetailsTemplateSelectorProperty);
         set => SetValue(RowDetailsTemplateSelectorProperty, value);
     }
 
@@ -876,12 +957,38 @@ public partial class TableView
         {
             tableView.OnIsReadOnlyChanged(e);
 
-            if ((tableView.SelectionMode is ListViewSelectionMode.None
+            if (!tableView.IsReadOnly) return;
+
+            if (tableView.IsEditing &&
+                tableView.CurrentCellSlot is not null &&
+                tableView.GetCellFromSlot(tableView.CurrentCellSlot.Value) is { } currentCell &&
+                tableView.EndCellEditing(TableViewEditAction.Cancel, currentCell))
+            {
+                tableView.SetIsEditing(false);
+            }
+
+            if (tableView.SelectionMode is ListViewSelectionMode.None
                 || tableView.SelectionUnit is TableViewSelectionUnit.Row)
-                && tableView.IsReadOnly)
             {
                 tableView.CurrentCellSlot = null;
             }
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to the ShowDragRectangle property.
+    /// </summary>
+    private static void OnShowDragRectangleChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView && e.NewValue is false)
+        {
+            // Hide the rectangle visual but don't stop drag selection or auto-scroll
+            if (tableView._dragRectangle is not null)
+            {
+                tableView._dragRectangle.Visibility = Visibility.Collapsed;
+            }
+
+            tableView._dragStartPoint = null;
         }
     }
 
@@ -896,6 +1003,17 @@ public partial class TableView
             {
                 header.SetFilterButtonVisibility();
             }
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to the ColumnAutoWidthMode property.
+    /// </summary>
+    private static void OnColumnAutoWidthModeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView)
+        {
+            tableView.RefreshColumnsAutoWidth();
         }
     }
 
@@ -928,7 +1046,7 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
-            if (tableView.SelectionUnit is TableViewSelectionUnit.Row)
+            if (tableView.SelectionUnit is TableViewSelectionUnit.Row or TableViewSelectionUnit.CellWithRow)
             {
                 tableView.SelectedCellRanges.Clear();
                 tableView.OnCellSelectionChanged();

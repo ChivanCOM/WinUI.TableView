@@ -1,6 +1,7 @@
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Windows.UI;
 using WinUI.TableView.SampleApp.Helpers;
 
 namespace WinUI.TableView.SampleApp;
@@ -24,31 +25,21 @@ public sealed partial class SettingsPage : Page
 
     private void OnThemeModeSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        var selectedTheme = ((ComboBoxItem)themeMode.SelectedItem)?.Tag?.ToString();
-        string color;
-        if (selectedTheme != null)
+        if (sender is not UIElement senderUiLement ||
+           (themeMode.SelectedItem as ComboBoxItem)?.Tag is not string selectedTheme)
         {
-            ThemeHelper.RootTheme = ThemeHelper.GetElementTheme(selectedTheme);
-            if (selectedTheme == "Dark")
-            {
-                TitleBarHelper.SetCaptionButtonColors(App.Current.MainWindow, Colors.White);
-                color = selectedTheme;
-            }
-            else if (selectedTheme == "Light")
-            {
-                TitleBarHelper.SetCaptionButtonColors(App.Current.MainWindow, Colors.Black);
-                color = selectedTheme;
-            }
-            else
-            {
-                color = TitleBarHelper.ApplySystemThemeToCaptionButtons(App.Current.MainWindow) == Colors.White ? "Dark" : "Light";
-            }
-            // announce visual change to automation
-            UIHelper.AnnounceActionForAccessibility(
-                (UIElement)sender,
-                $"Theme changed to {color}",
-                "ThemeChangedNotificationActivityId");
+            return;
         }
+
+        ThemeHelper.RootTheme = ThemeHelper.GetElementTheme(selectedTheme);
+        var elementThemeResolved = ThemeHelper.RootTheme == ElementTheme.Default ? ThemeHelper.ActualTheme : ThemeHelper.RootTheme;
+        TitleBarHelper.ApplySystemThemeToCaptionButtons(App.Current.MainWindow, elementThemeResolved);
+
+        // announce visual change to automation
+        UIHelper.AnnounceActionForAccessibility(
+            senderUiLement,
+            $"Theme changed to {elementThemeResolved}",
+            "ThemeChangedNotificationActivityId");
     }
 
     public string Version

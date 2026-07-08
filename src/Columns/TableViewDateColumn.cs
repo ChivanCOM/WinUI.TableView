@@ -2,6 +2,8 @@
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using System;
+using Windows.Globalization.DateTimeFormatting;
+using Windows.System.UserProfile;
 using WinUI.TableView.Controls;
 using WinUI.TableView.Extensions;
 using WinUI.TableView.Helpers;
@@ -19,6 +21,20 @@ namespace WinUI.TableView;
 #endif
 public partial class TableViewDateColumn : TableViewBoundColumn
 {
+    /// <summary>
+    /// Initializes a new instance of the TableViewDateColumn class.
+    /// </summary>
+    public TableViewDateColumn()
+    {
+#if WINDOWS
+        var languages = GlobalizationPreferences.Languages;
+        var patterns = languages.Count > 0 ? new DateTimeFormatter("shortdate", languages).Patterns : null;
+        DateFormat = patterns?.Count > 0 ? patterns[0] : "shortdate"; 
+#else
+        DateFormat = DateTimeFormatter.ShortDate.Patterns[0];
+#endif
+    }
+
     /// <summary>
     /// Generates a TextBlock element for the cell.
     /// </summary>

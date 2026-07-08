@@ -1,6 +1,7 @@
 using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -10,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Windows.Foundation;
 using Windows.System;
 using Windows.UI.Core;
 using WinUI.TableView.Collections;
@@ -37,7 +39,7 @@ public partial class TableViewColumnHeader : ContentControl
     private TableView? _tableView;
     private TableViewHeaderRow? _headerRow;
     private Button? _optionsButton;
-    private MenuFlyout? _optionsFlyout;
+    private TableViewFilterMenuFlyout? _optionsFlyout;
     private ContentPresenter? _contentPresenter;
     private Rectangle? _v_gridLine;
     private bool _resizeStarted;
@@ -45,8 +47,7 @@ public partial class TableViewColumnHeader : ContentControl
     private bool _resizePreviousStarted;
     private double _reorderStartingPosition;
     private bool _reorderStarted;
-    private RenderTargetBitmap? _dragVisuals;
-    private TableViewFilterItemsControl? _filterItemsControl;
+    private RenderTargetBitmap? _dragVisuals;    
 
     /// <summary>
     /// Initializes a new instance of the TableViewColumnHeader class.
@@ -64,9 +65,9 @@ public partial class TableViewColumnHeader : ContentControl
     /// </summary>
     private void OnWidthChanged(DependencyObject sender, DependencyProperty dp)
     {
-        if (Column is not null)
+        if (!double.IsNaN(Width))
         {
-            Column.ActualWidth = Width;
+            Column?.ActualWidth = Width;
         }
     }
 
@@ -165,9 +166,9 @@ public partial class TableViewColumnHeader : ContentControl
     /// <summary>
     /// Applies the filter for the column.
     /// </summary>
-    private void ApplyFilter()
+    internal void ApplyFilter()
     {
-        var shouldApplyFilter = _filterItemsControl?.ShouldApplyFilter ?? false;
+        var shouldApplyFilter = FilterItemsControl?.ShouldApplyFilter ?? false;
 
         if (!shouldApplyFilter && (Column?.IsFiltered ?? false))
         {
@@ -182,11 +183,13 @@ public partial class TableViewColumnHeader : ContentControl
 
     private ICollection<object?> GetSelectedValues()
     {
-        var filterItems = _filterItemsControl?.FilterItems ?? [];
+        var filterItems = FilterItemsControl?.FilterItems ?? [];
         var selectedValues = filterItems.Where(x => x.IsSelected).Select(x => x.Value);
         var firstItem = selectedValues.FirstOrDefault(x => x is not null);
         var firstItemType = firstItem?.GetType();
 
+#pragma warning disable IDE0306 // Simplify collection initialization
+#pragma warning disable IDE0028 // Simplify collection initialization
         return firstItemType switch
         {
             Type t when t == typeof(int) => new ObjectBackedTypedSet<int?>(selectedValues),
@@ -197,12 +200,14 @@ public partial class TableViewColumnHeader : ContentControl
 
             _ => [.. selectedValues],
         };
+#pragma warning restore IDE0028 // Simplify collection initialization
+#pragma warning restore IDE0306 // Simplify collection initialization
     }
 
     /// <summary>
     /// Hides the options flyout.
     /// </summary>
-    private void HideFlyout()
+    internal void HideFlyout()
     {
         _optionsFlyout?.Hide();
     }
@@ -236,10 +241,16 @@ public partial class TableViewColumnHeader : ContentControl
     {
         base.OnApplyTemplate();
 
+        _optionsButton?.Tapped -= OnOptionsButtonTaped;
+
+        FilterItemsControl?.FilterItems = null;
+        FilterItemsControl?.TableView = null;
+        FilterItemsControl?.ColumnHeader = null;
+        FilterItemsControl = null;
         _tableView = this.FindAscendant<TableView>();
         _headerRow = this.FindAscendant<TableViewHeaderRow>();
         _optionsButton = GetTemplateChild("OptionsButton") as Button;
-        _optionsFlyout = GetTemplateChild("OptionsFlyout") as MenuFlyout;
+        _optionsFlyout = GetTemplateChild("OptionsFlyout") as TableViewFilterMenuFlyout;
         _contentPresenter = GetTemplateChild("ContentPresenter") as ContentPresenter;
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
 
@@ -248,44 +259,14 @@ public partial class TableViewColumnHeader : ContentControl
             return;
         }
 
-        _optionsFlyout.Opening += OnOptionsFlyoutOpening;
-        _optionsFlyout.Closed += OnOptionsFlyoutClosed;
+        _optionsFlyout.TableView = _tableView;
+        _optionsFlyout.ColumnHeader = this;
+
         _optionsButton.Tapped += OnOptionsButtonTaped;
-
-        if (GetTemplateChild("FilterItemsMenuItem") is MenuFlyoutItem filterItemsMenuItem)
-        {
-            filterItemsMenuItem.ApplyTemplate();
-            _filterItemsControl = filterItemsMenuItem.FindDescendant<TableViewFilterItemsControl>();
-
-            if (_filterItemsControl is not null)
-            {
-                _filterItemsControl.TableView = _tableView;
-                _filterItemsControl.ColumnHeader = this;
-            }
-            
-            // Handle Space key to prevent MenuFlyoutItem performing click action.
-            filterItemsMenuItem.PreviewKeyUp += static (_, e) => e.Handled = e.Key is VirtualKey.Space;
-        }
 
         SetOptionCommands();
         SetFilterButtonVisibility();
         EnsureGridLines();
-    }
-
-    /// <summary>
-    /// Handles the Opening event for the options flyout.
-    /// </summary>
-    private async void OnOptionsFlyoutOpening(object? sender, object e)
-    {
-        _filterItemsControl?.Initialize();
-    }
-
-    /// <summary>
-    /// Handles the Closed event for the options flyout.
-    /// </summary>
-    private void OnOptionsFlyoutClosed(object? sender, object e)
-    {
-        _filterItemsControl?.ClearSearchBox();
     }
 
     /// <summary>
@@ -335,19 +316,13 @@ public partial class TableViewColumnHeader : ContentControl
     /// </summary>
     internal void SetFilterButtonVisibility()
     {
-        if (_optionsButton is not null)
-        {
-            _optionsButton.Visibility = CanFilter ? Visibility.Visible : Visibility.Collapsed;
-        }
+        _optionsButton?.Visibility = CanFilter ? Visibility.Visible : Visibility.Collapsed;
 
-        if (_contentPresenter is not null)
-        {
-            _contentPresenter.Margin = CanFilter ? new Thickness(
+        _contentPresenter?.Margin = CanFilter ? new Thickness(
                 Padding.Left,
                 Padding.Top,
                 Padding.Right + 8,
                 0) : Padding;
-        }
     }
 
     /// <summary>
@@ -385,19 +360,11 @@ public partial class TableViewColumnHeader : ContentControl
 
         if (position.X <= 8 && _headerRow?.GetPreviousHeader(this) is { Column: { } } header)
         {
-            var width = Math.Clamp(
-                header.Column.DesiredWidth,
-                header.Column.MinWidth ?? _tableView.MinColumnWidth,
-                header.Column.MaxWidth ?? _tableView.MaxColumnWidth);
-            header.Column.Width = new GridLength(width, GridUnitType.Pixel);
+            header.Column.Width = GridLength.Auto;
         }
         else if (Column is not null)
         {
-            var width = Math.Clamp(
-                Column.DesiredWidth,
-                Column.MinWidth ?? _tableView.MinColumnWidth,
-                Column.MaxWidth ?? _tableView.MaxColumnWidth);
-            Column.Width = new GridLength(width, GridUnitType.Pixel);
+            Column.Width = GridLength.Auto;
         }
     }
 
@@ -520,6 +487,22 @@ public partial class TableViewColumnHeader : ContentControl
         _reorderStarted = false;
     }
 
+    /// <inheritdoc/>
+    protected override Size MeasureOverride(Size availableSize)
+    {
+        if (Column is not null && _tableView is not null)
+        {
+            var autoWidthMode = Column.ColumnAutoWidthMode ?? _tableView.ColumnAutoWidthMode;
+            if (autoWidthMode is TableViewColumnAutoWidthMode.Header or TableViewColumnAutoWidthMode.Both)
+            {
+                var desiredHeaderSize = base.MeasureOverride(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                Column.DesiredWidth = Math.Max(Column.DesiredWidth, desiredHeaderSize.Width);
+            }
+        }
+
+        return base.MeasureOverride(availableSize);
+    }
+
     /// <summary>
     /// Ensures grid lines are applied.
     /// </summary>
@@ -565,4 +548,26 @@ public partial class TableViewColumnHeader : ContentControl
     /// Gets a value indicating whether the cursor is in the sizing area.
     /// </summary>
     private bool IsSizingCursor => ProtectedCursor is InputSystemCursor { CursorShape: InputSystemCursorShape.SizeWestEast };
+
+    /// <summary>
+    /// Gets or sets the filter items control associated with the column header.
+    /// </summary>
+    internal TableViewFilterItemsControl? FilterItemsControl { get; set; }
+
+    /// <summary>
+    /// Cycles through sort directions (ascending → descending → unsorted) for automation support.
+    /// </summary>
+    internal void InvokeSortCycle()
+    {
+        if (CanSort && Column is not null)
+        {
+            DoSort(GetNextSortDirection());
+        }
+    }
+
+    /// <inheritdoc/>
+    protected override AutomationPeer OnCreateAutomationPeer()
+    {
+        return new AutomationPeers.TableViewColumnHeaderAutomationPeer(this);
+    }
 }

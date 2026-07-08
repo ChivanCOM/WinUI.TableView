@@ -16,7 +16,6 @@ namespace WinUI.TableView.Controls;
 public partial class TableViewFilterItemsControl : UserControl
 {
     private bool _canSetState = true;
-    private ICollection<TableViewFilterItem>? _filterItems;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TableViewFilterItemsControl"/> class.
@@ -50,10 +49,7 @@ public partial class TableViewFilterItemsControl : UserControl
     /// </summary>
     internal void ClearSearchBox()
     {
-        if (searchBox is not null)
-        {
-            searchBox.Text = string.Empty;
-        }
+        searchBox?.Text = string.Empty;
     }
 
     private void OnSearchBoxTextChanged(object sender, TextChangedEventArgs e)
@@ -68,7 +64,8 @@ public partial class TableViewFilterItemsControl : UserControl
     {
         if (e.Key == VirtualKey.Enter && searchBox?.Text.Length > 0)
         {
-            ColumnHeader?.ExecuteOkCommand();
+            ColumnHeader?.HideFlyout();
+            ColumnHeader?.ApplyFilter();
 
             e.Handled = true;
         }
@@ -93,8 +90,8 @@ public partial class TableViewFilterItemsControl : UserControl
         }
 
 
-        selectAllCheckBox.IsChecked = _filterItems?.All(x => x.IsSelected) ?? false ? true
-                                      : _filterItems?.All(x => !x.IsSelected) ?? false ? false
+        selectAllCheckBox.IsChecked = FilterItems?.All(x => x.IsSelected) ?? false ? true
+                                      : FilterItems?.All(x => !x.IsSelected) ?? false ? false
                                       : null;
     }
 
@@ -119,9 +116,9 @@ public partial class TableViewFilterItemsControl : UserControl
     /// </summary>
     private void AttachPropertyChangedHandlers()
     {
-        if (_filterItems?.Count > 0)
+        if (FilterItems?.Count > 0)
         {
-            foreach (var item in _filterItems)
+            foreach (var item in FilterItems)
             {
                 item.PropertyChanged += OnFilterItemPropertyChanged;
             }
@@ -133,9 +130,9 @@ public partial class TableViewFilterItemsControl : UserControl
     /// </summary>
     private void DetachPropertyChangedHandlers()
     {
-        if (_filterItems?.Count > 0)
+        if (FilterItems?.Count > 0)
         {
-            foreach (var item in _filterItems)
+            foreach (var item in FilterItems)
             {
                 item.PropertyChanged -= OnFilterItemPropertyChanged;
             }
@@ -160,14 +157,14 @@ public partial class TableViewFilterItemsControl : UserControl
     /// </summary>
     internal ICollection<TableViewFilterItem>? FilterItems
     {
-        get => _filterItems;
+        get;
         set
         {
-            if (_filterItems == value) return;
+            if (field == value) return;
 
             DetachPropertyChangedHandlers();
-            _filterItems = value;
-            filterItemsList.ItemsSource = _filterItems;
+            field = value;
+            filterItemsList.ItemsSource = field;
             AttachPropertyChangedHandlers();
             SetSelectAllCheckBoxState();
         }
@@ -176,7 +173,19 @@ public partial class TableViewFilterItemsControl : UserControl
     /// <summary>
     /// Gets or sets the column header associated with the filter items control.
     /// </summary>
-    public TableViewColumnHeader? ColumnHeader { get; internal set; }
+    public TableViewColumnHeader? ColumnHeader
+    {
+        get;
+        set
+        {
+            if (value is { FilterItemsControl: null })
+            {
+                value.FilterItemsControl = this;
+            }
+
+            field = value;
+        }
+    }
 
     /// <summary>
     /// Gets or sets the TableView associated with the filter items control.

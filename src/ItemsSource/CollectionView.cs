@@ -24,9 +24,7 @@ namespace WinUI.TableView;
 /// </remarks>
 internal partial class CollectionView : ICollectionView, ISupportIncrementalLoading, INotifyPropertyChanged, IComparer<object?>, ITableViewItemsSource
 {
-    private IEnumerable _source = new List<object>();
     private object[] _itemsCopy = []; // In case the source is ICollection, keep a copy of the items to keep track of removed items.
-    private bool _allowLiveShaping;
     private readonly List<object?> _view = [];
     private readonly ObservableCollection<FilterDescription> _filterDescriptions = [];
     private readonly ObservableCollection<SortDescription> _sortDescriptions = [];
@@ -178,12 +176,12 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
                 }
 
                 DetachPropertyChangedHandlers(_itemsCopy);
-                AttachPropertyChangedHandlers(_source);
+                AttachPropertyChangedHandlers(Source);
 
                 break;
         }
 
-        CreateItemsCopy(_source);
+        CreateItemsCopy(Source);
     }
 
     /// <summary>
@@ -244,7 +242,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
                 }
 
                 DetachPropertyChangedHandlers(e.OldItems);
-                AttachPropertyChangedHandlers(_source);
+                AttachPropertyChangedHandlers(Source);
 
                 break;
         }
@@ -273,7 +271,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
             }
             else if (viewIndex == -1 && filterResult)
             {
-                var index = _source.IndexOf(item);
+                var index = Source.IndexOf(item);
                 HandleItemAdded(index, item);
             }
         }
@@ -335,7 +333,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
             }
             else
             {
-                _view.AddRange(_source.OfType<object>());
+                _view.AddRange(Source.OfType<object>());
             }
 
             if (SortDescriptions.Count > 0)
@@ -369,7 +367,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
         var viewHash = new HashSet<object?>(_view);
         var viewIndex = 0;
         var i = 0;
-        foreach (var item in _source)
+        foreach (var item in Source)
         {
             if (viewHash.Contains(item))
             {
@@ -425,7 +423,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
         }
         else if (FilterDescriptions.Any())
         {
-            if (_source == null)
+            if (Source == null)
             {
                 HandleSourceChanged();
                 return false;
@@ -513,7 +511,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
     {
         if (IsReadOnly) throw new NotSupportedException("Collection is read-only.");
 
-        _source.Add(item);
+        Source.Add(item);
     }
 
     /// <summary>
@@ -523,7 +521,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
     {
         if (IsReadOnly) throw new NotSupportedException("Collection is read-only.");
 
-        _source.Clear();
+        Source.Clear();
     }
 
     /// <summary>
@@ -565,7 +563,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
     {
         if (IsReadOnly) throw new NotSupportedException("Collection is read-only.");
 
-        _source.Insert(index, item);
+        Source.Insert(index, item);
     }
 
     /// <summary>
@@ -633,7 +631,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
     {
         if (IsReadOnly) throw new NotSupportedException("Collection is read-only.");
 
-        _source.Remove(item);
+        Source.Remove(item);
 
         return true;
     }
@@ -668,7 +666,7 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
     /// <returns>An asynchronous operation that returns the result of the load operation.</returns>
     public IAsyncOperation<LoadMoreItemsResult>? LoadMoreItemsAsync(uint count)
     {
-        return (_source as ISupportIncrementalLoading)?.LoadMoreItemsAsync(count);
+        return (Source as ISupportIncrementalLoading)?.LoadMoreItemsAsync(count);
     }
 
     /// <summary>

@@ -40,11 +40,11 @@ public partial class UnitTestApp : Application
     /// <param name="args">Details about the launch request and process.</param>
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
-        UnitTestClient.CreateDefaultUI();
-
         MainWindow.Activate();
 
         UITestMethodAttribute.DispatcherQueue = MainWindow.DispatcherQueue;
+
+        UnitTestClient.CreateDefaultUI();
 
         UnitTestClient.Run(Environment.CommandLine);
     }

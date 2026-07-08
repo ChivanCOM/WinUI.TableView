@@ -9,6 +9,7 @@
             </ResourceDictionary.MergedDictionaries>
 
             <!-- Converters -->
+            <converters:VisibilityToBoolConverter VisibleValue="False" x:Key="VisibilityToBool"/>
             <converters:NullToVisibilityConverter x:Name="NullToVisibility" />
             <converters:ColorToBrushConverter x:Key="ColorToBrush" />
             <converters:EnumToStringConverter x:Key="EnumToString" />

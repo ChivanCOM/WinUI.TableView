@@ -12,7 +12,7 @@ on:
       - 'docs/**'
 
 jobs:
-  build:
+  build-winui-sample:
     runs-on: windows-latest
 
     strategy:
@@ -21,7 +21,7 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4.1.4
+      uses: actions/checkout@v6.0.3
       with:
         submodules: recursive
 
@@ -36,6 +36,197 @@ jobs:
           9.0.x
           10.0.100
 
-    - name: Build
+    - name: Build WinUI sample app
       run: |
-        msbuild /restore samples/WinUI.TableView.SampleApp/WinUI.TableView.SampleApp.csproj /p:Configuration=Release /p:Platform=${{ matrix.architecture }}
+        msbuild /restore samples/WinUI.TableView.SampleApp/WinUI.TableView.SampleApp.csproj /p:Configuration=Release /p:Platform=${{ matrix.architecture }} /bl:artifacts/binlogs/build-winui-sample-${{ matrix.architecture }}.binlog
+
+    - name: Upload WinUI sample artifacts
+      uses: actions/upload-artifact@v7.0.1
+      with:
+        name: winui-sample-${{ matrix.architecture }}
+        if-no-files-found: warn
+        path: |
+          samples/WinUI.TableView.SampleApp/bin/${{ matrix.architecture }}/Release/**
+          artifacts/binlogs/build-winui-sample-${{ matrix.architecture }}.binlog
+
+  build-uno-desktop:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6.0.3
+      with:
+        submodules: recursive
+
+    - name: Setup .NET Core SDK
+      uses: actions/setup-dotnet@v5.0.1
+      with:
+        dotnet-version: |
+          8.0.x
+          9.0.x
+          10.0.100
+
+    - name: Restore Uno workloads
+      run: dotnet workload restore samples/WinUI.TableView.SampleApp.Uno/WinUI.TableView.SampleApp.Uno.csproj
+
+    - name: Build Uno desktop sample app
+      run: dotnet build samples/WinUI.TableView.SampleApp.Uno/WinUI.TableView.SampleApp.Uno.csproj -c Release -f net10.0-desktop -bl:artifacts/binlogs/build-uno-desktop.binlog
+
+    - name: Upload Uno desktop artifacts
+      uses: actions/upload-artifact@v7.0.1
+      with:
+        name: uno-desktop
+        if-no-files-found: warn
+        path: |
+          samples/WinUI.TableView.SampleApp.Uno/bin/Release/net10.0-desktop/**
+          artifacts/binlogs/build-uno-desktop.binlog
+
+  build-uno-wasm:
+    env:
+      DIST_PATH: samples/WinUI.TableView.SampleApp.Uno/bin/Release/net10.0-browserwasm/publish/wwwroot
+      DotnetVersion: '10.0.100'
+    runs-on: ubuntu-latest
+    container: 'unoplatform/wasm-build:3.0'
+    steps:
+      - uses: actions/checkout@v6.0.3
+        with:
+          submodules: true
+          lfs: false
+
+      # When running on macos, set the DOTNET_INSTALL_DIR so a workspace local folder
+      # is used to install the SDK. This is required for the Uno.Sdk.Updater to work
+      - name: Set DOTNET_INSTALL_DIR
+        if: runner.os == 'macos' || runner.os == 'linux'
+        shell: bash
+        run: echo "DOTNET_INSTALL_DIR=$GITHUB_WORKSPACE/.dotnet" >> $GITHUB_ENV
+
+      - name: 'Set Wasm cache path'
+        shell: pwsh
+        run: echo "WasmCachePath=${{ github.workspace }}/.emscripten-cache" >> $env:GITHUB_ENV
+
+      - name: Cache EMSDK
+        id: cache-emsdk
+        uses: actions/cache@v4
+        env:
+            cache-name: cache-emsdk-modules
+        with:
+            path: ${{ env.WasmCachePath }}
+            key: ${{ runner.os }}-build-emsdk-${{ env.DotnetVersion }}
+            restore-keys: |
+              ${{ runner.os }}-build-emsdk-${{ env.DotnetVersion }}
+
+      - name: Cache .NET
+        id: cache-dotnet
+        uses: actions/cache@v4
+        env:
+            cache-name: cache-dotnet-install
+        with:
+            path: ${{ github.workspace }}/.dotnet
+            key: ${{ runner.os }}-build-dotnet-${{ env.DotnetVersion }}
+            restore-keys: |
+              ${{ runner.os }}-build-dotnet-${{ env.DotnetVersion }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5.0.1
+        with:
+          dotnet-version: ${{ env.DotnetVersion }}
+
+      - uses: dotnet/nbgv@f088059084cb5d872e9d1a994433ca6440c2bf72 # v0.4.2
+        id: nbgv
+        with:
+          toolVersion: 3.6.139
+          setAllVars: true
+
+      - name: Setup Workloads
+        run: |
+          cd samples/WinUI.TableView.SampleApp.Uno
+          dotnet workload restore
+
+      - name: Install Wasm Tools
+        run: |
+          cd samples/WinUI.TableView.SampleApp.Uno
+          dotnet workload install wasm-tools
+
+      - name: Build Uno wasm sample app
+        run: |
+          cd samples/WinUI.TableView.SampleApp.Uno
+          dotnet publish -c Release -f net10.0-browserwasm "/p:PackageVersion=${{ steps.nbgv.outputs.SemVer2 }}" -bl:artifacts/binlogs/build-uno-wasm.binlog
+
+      - name: Upload Uno wasm artifacts
+        uses: actions/upload-artifact@v7.0.1
+        with:
+         name: uno-wasm
+         if-no-files-found: warn
+         path: |
+           samples/WinUI.TableView.SampleApp.Uno/bin/Release/net10.0-browserwasm/**
+           artifacts/binlogs/build-uno-wasm.binlog
+
+  deploy-uno-wasm:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-uno-wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Uno wasm artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: uno-wasm
+          path: wasm-dist
+
+      - name: Deploy to Azure Static Web Apps
+        id: builddeploy
+        continue-on-error: true
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_LIVELY_GROUND_0D0F6A810 }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }} # Used for Github integrations (i.e. PR comments)
+          action: "upload"
+          ###### Repository/Build Configurations - These values can be configured to match your app requirements. ######
+          # For more information regarding Static Web App workflow configurations, please visit: https://aka.ms/swaworkflowconfig
+          app_location: "wasm-dist/samples/WinUI.TableView.SampleApp.Uno/bin/Release/net10.0-browserwasm/publish/wwwroot" # App source code path
+          api_location: "" # Api source code path - optional
+          output_location: "" # Built app content directory - optional
+          ###### End of Repository/Build Configurations ######
+
+  build-uno-mobile:
+    if: false # Disabled for now.
+    runs-on: macos-latest
+
+    strategy:
+      matrix:
+        target_framework: [net10.0-android, net10.0-ios]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6.0.3
+      with:
+        submodules: recursive
+
+    - name: Set DOTNET_INSTALL_DIR
+      shell: bash
+      run: echo "DOTNET_INSTALL_DIR=$GITHUB_WORKSPACE/.dotnet" >> "$GITHUB_ENV"
+
+    - name: Setup .NET Core SDK
+      uses: actions/setup-dotnet@v5.0.1
+      with:
+        dotnet-version: |
+          8.0.x
+          9.0.x
+          10.0.100
+
+    - name: Restore Uno workloads
+      run: dotnet workload restore samples/WinUI.TableView.SampleApp.Uno/WinUI.TableView.SampleApp.Uno.csproj
+
+    - name: Install mobile workloads
+      run: dotnet workload install android ios
+
+    - name: Build Uno mobile sample app
+      run: dotnet build samples/WinUI.TableView.SampleApp.Uno/WinUI.TableView.SampleApp.Uno.csproj -c Release -f ${{ matrix.target_framework }} -bl:artifacts/binlogs/build-uno-mobile-${{ matrix.target_framework }}.binlog
+
+    - name: Upload Uno mobile artifacts
+      uses: actions/upload-artifact@v7.0.1
+      with:
+        name: uno-mobile-${{ matrix.target_framework }}
+        if-no-files-found: warn
+        path: |
+          samples/WinUI.TableView.SampleApp.Uno/bin/Release/${{ matrix.target_framework }}/**
+          artifacts/binlogs/build-uno-mobile-${{ matrix.target_framework }}.binlog

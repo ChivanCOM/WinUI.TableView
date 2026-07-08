@@ -8,9 +8,6 @@ on:
       - 'samples/**'
   pull_request:
     branches: main
-    paths-ignore:
-      - 'docs/**'
-      - 'samples/**'
 
 jobs:
   build:
@@ -44,12 +41,11 @@ jobs:
         msbuild /restore `
                 /t:Build tests/WinUI.TableView.Tests.csproj `
                 /p:Platform=x64 `
-                /p:Configuration=Release `
-                /p:OutputPath=build
+                /p:Configuration=Release
                 
     - name: Run Tests
       run: |
-        vstest.console.exe tests\build\WinUI.TableView.Tests.build.appxrecipe --logger:"console;verbosity=normal" /InIsolation
+        tests\bin\x64\Release\net10.0-windows10.0.26100.0\WinUI.TableView.Tests.build.appxrecipe --logger:"console;verbosity=normal" /InIsolation
  
     - name: Upload artifacts
       uses: actions/upload-artifact@v4

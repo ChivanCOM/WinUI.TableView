@@ -36,7 +36,7 @@ jobs:
                 /t:Build,Pack src/WinUI.TableView.csproj `
                 /p:Configuration=Release `
                 /p:Version=${{ steps.version.outputs.version }} `
-                /p:PackageReleaseNotes="https://github.com/w-ahmad/WinUI.TableView/releases/tag/v${{ steps.version.outputs.version }}"
+                /p:PackageReleaseNotes="https://w-ahmad.dev/WinUI.TableView/docs/release-notes/v${{ steps.version.outputs.version }}.html"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4

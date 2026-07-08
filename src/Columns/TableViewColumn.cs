@@ -2,6 +2,7 @@
 using Microsoft.UI.Xaml.Data;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using WinUI.TableView.Extensions;
 using SD = WinUI.TableView.SortDirection;
 
@@ -14,14 +15,9 @@ namespace WinUI.TableView;
 [StyleTypedProperty(Property = nameof(CellStyle), StyleTargetType = typeof(TableViewCell))]
 public abstract partial class TableViewColumn : DependencyObject
 {
-    private TableViewColumnHeader? _headerControl;
-    private double _desiredWidth;
-    private SD? _sortDirection;
-    private bool _isFiltered;
-    private bool _isFrozen;
-    private Func<object, object?>? _funcCompiledPropertyPath;
-    private Func<object, object?>? _funcCompiledClipboardPropertyPath;
-    private Binding? _clipboardContentBinding;
+    private Func<object, object?>? _compliedValueGetter;
+    private Func<object, object?>? _compliedClipboardValueGetter;
+    private Action<object, object?>? _compliedClipboardValueSetter;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TableViewColumn"/> class with default conditional cell styles.
@@ -112,11 +108,11 @@ public abstract partial class TableViewColumn : DependencyObject
         if (dataItem is null)
             return null;
 
-        if (_funcCompiledPropertyPath is null && !string.IsNullOrWhiteSpace(OperationContentBindingPropertyPath))
-            _funcCompiledPropertyPath = dataItem.GetFuncCompiledPropertyPath(OperationContentBindingPropertyPath!);
+        if (_compliedValueGetter is null && !string.IsNullOrWhiteSpace(OperationContentBindingPropertyPath))
+            _compliedValueGetter = dataItem.GetCompiledValueGetter(OperationContentBindingPropertyPath!);
 
-        if (_funcCompiledPropertyPath is not null)
-            dataItem = _funcCompiledPropertyPath(dataItem);
+        if (_compliedValueGetter is not null)
+            dataItem = _compliedValueGetter(dataItem);
 
         if (OperationContentBinding?.Converter is not null)
         {
@@ -140,11 +136,11 @@ public abstract partial class TableViewColumn : DependencyObject
         if (dataItem is null)
             return null;
 
-        if (_funcCompiledClipboardPropertyPath is null && !string.IsNullOrWhiteSpace(ClipboardContentBindingPropertyPath))
-            _funcCompiledClipboardPropertyPath = dataItem.GetFuncCompiledPropertyPath(ClipboardContentBindingPropertyPath!);
+        if (_compliedClipboardValueGetter is null && !string.IsNullOrWhiteSpace(ClipboardContentBindingPropertyPath))
+            _compliedClipboardValueGetter = dataItem.GetCompiledValueGetter(ClipboardContentBindingPropertyPath!);
 
-        if (_funcCompiledClipboardPropertyPath is not null)
-            dataItem = _funcCompiledClipboardPropertyPath(dataItem);
+        if (_compliedClipboardValueGetter is not null)
+            dataItem = _compliedClipboardValueGetter(dataItem);
 
         if (ClipboardContentBinding?.Converter is not null)
         {
@@ -156,6 +152,44 @@ public abstract partial class TableViewColumn : DependencyObject
         }
 
         return dataItem;
+    }
+
+    /// <summary>
+    /// Sets the content from the clipboard to the specified data item.
+    /// </summary>
+    /// <param name="dataItem">The data item.</param>
+    /// <param name="value">The value to set.</param>
+    /// <returns><see langword="true"/> if the value was set; otherwise, <see langword="false"/>.</returns>
+    public virtual bool SetClipboardContent(object? dataItem, object? value)
+    {
+        if (dataItem is null)
+            return false;
+
+        try
+        {
+            if (_compliedClipboardValueSetter is null && !string.IsNullOrWhiteSpace(ClipboardContentBindingPropertyPath))
+                _compliedClipboardValueSetter = dataItem.GetCompiledValueSetter(ClipboardContentBindingPropertyPath!);
+
+            if (_compliedClipboardValueSetter is null)
+                return false;
+
+            if (ClipboardContentBinding?.Converter is not null)
+            {
+                value = ClipboardContentBinding.Converter.ConvertBack(
+                    value,
+                    typeof(object),
+                    ClipboardContentBinding.ConverterParameter,
+                    ClipboardContentBinding.ConverterLanguage);
+            }
+
+            _compliedClipboardValueSetter(dataItem, value);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"TableViewColumn: SetClipboardContent failed: {ex}");
+            return false;
+        }
     }
 
     /// <summary>
@@ -201,6 +235,15 @@ public abstract partial class TableViewColumn : DependencyObject
     {
         get => (double)GetValue(ActualWidthProperty);
         set => SetValue(ActualWidthProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets the ColumnAutoWidthMode of the column.
+    /// </summary>
+    public TableViewColumnAutoWidthMode? ColumnAutoWidthMode
+    {
+        get => (TableViewColumnAutoWidthMode?)GetValue(ColumnAutoWidthModeProperty);
+        set => SetValue(ColumnAutoWidthModeProperty, value);
     }
 
     /// <summary>
@@ -270,11 +313,14 @@ public abstract partial class TableViewColumn : DependencyObject
     /// </summary>
     public TableViewColumnHeader? HeaderControl
     {
-        get => _headerControl;
+        get;
         internal set
         {
-            _headerControl = value;
-            EnsureHeaderStyle();
+            if (field != value)
+            {
+                field = value;
+                EnsureHeaderStyle();
+            }
         }
     }
 
@@ -348,12 +394,12 @@ public abstract partial class TableViewColumn : DependencyObject
     /// </summary>
     internal double DesiredWidth
     {
-        get => _desiredWidth;
+        get;
         set
         {
-            if (_desiredWidth != value)
+            if (field != value)
             {
-                _desiredWidth = value;
+                field = value;
                 OwningCollection?.HandleColumnPropertyChanged(this, nameof(DesiredWidth));
             }
         }
@@ -374,11 +420,14 @@ public abstract partial class TableViewColumn : DependencyObject
     /// </summary>
     public SD? SortDirection
     {
-        get => _sortDirection;
+        get;
         set
         {
-            _sortDirection = value;
-            OnSortDirectionChanged();
+            if (field != value)
+            {
+                field = value;
+                OnSortDirectionChanged();
+            }
         }
     }
 
@@ -387,11 +436,14 @@ public abstract partial class TableViewColumn : DependencyObject
     /// </summary>
     public bool IsFiltered
     {
-        get => _isFiltered;
+        get;
         set
         {
-            _isFiltered = value;
-            OnIsFilteredChanged();
+            if (field != value)
+            {
+                field = value;
+                OnIsFilteredChanged();
+            }
         }
     }
 
@@ -400,12 +452,12 @@ public abstract partial class TableViewColumn : DependencyObject
     /// </summary>
     public bool IsFrozen
     {
-        get => _isFrozen;
+        get;
         internal set
         {
-            if (_isFrozen != value)
+            if (field != value)
             {
-                _isFrozen = value;
+                field = value;
                 OwningCollection?.HandleColumnPropertyChanged(this, nameof(IsFrozen));
             }
         }
@@ -427,8 +479,8 @@ public abstract partial class TableViewColumn : DependencyObject
     /// </summary>
     public Binding? ClipboardContentBinding
     {
-        get => _clipboardContentBinding ?? OperationContentBinding;
-        set => _clipboardContentBinding = value;
+        get => field ?? OperationContentBinding;
+        set;
     }
 
     /// <summary>
@@ -462,10 +514,7 @@ public abstract partial class TableViewColumn : DependencyObject
     /// </summary>
     internal void EnsureHeaderStyle()
     {
-        if (_headerControl is not null)
-        {
-            _headerControl.Style = HeaderStyle ?? TableView?.ColumnHeaderStyle;
-        }
+        HeaderControl?.Style = HeaderStyle ?? TableView?.ColumnHeaderStyle;
     }
 
     /// <summary>
@@ -485,12 +534,42 @@ public abstract partial class TableViewColumn : DependencyObject
                 column.OwningCollection.HandleColumnPropertyChanged(column, nameof(MaxWidth));
             else if (e.Property == ActualWidthProperty)
                 column.OwningCollection.HandleColumnPropertyChanged(column, nameof(ActualWidth));
-            else if (e.Property == IsReadOnlyProperty)
-                column.OwningCollection.HandleColumnPropertyChanged(column, nameof(IsReadOnly));
             else if (e.Property == VisibilityProperty)
                 column.OwningCollection.HandleColumnPropertyChanged(column, nameof(Visibility));
             else if (e.Property == OrderProperty)
                 column.OwningCollection.HandleColumnPropertyChanged(column, nameof(Order));
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to the ColumnAutoWidthMode property.
+    /// </summary>
+    private static void OnColumnAutoWidthModeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableViewColumn column)
+        {
+            column.TableView?.RefreshColumnsAutoWidth([column]);
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to the IsReadOnly property.
+    /// </summary>
+    private static void OnIsReadOnlyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableViewColumn column)
+        {
+            if (column.TableView is TableView tableView &&
+                tableView.IsReadOnly &&
+                tableView.IsEditing &&
+                tableView.CurrentCellSlot is not null &&
+                tableView.GetCellFromSlot(tableView.CurrentCellSlot.Value) is { } currentCell &&
+                tableView.EndCellEditing(TableViewEditAction.Cancel, currentCell))
+            {
+                tableView.SetIsEditing(false);
+            }
+
+            column.OwningCollection?.HandleColumnPropertyChanged(column, nameof(IsReadOnly));
         }
     }
 
@@ -566,6 +645,11 @@ public abstract partial class TableViewColumn : DependencyObject
     public static readonly DependencyProperty ActualWidthProperty = DependencyProperty.Register(nameof(ActualWidth), typeof(double), typeof(TableViewColumn), new PropertyMetadata(0d, OnPropertyChanged));
 
     /// <summary>
+    /// Identifies the ColumnAutoWidthMode dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ColumnAutoWidthModeProperty = DependencyProperty.Register(nameof(ColumnAutoWidthMode), typeof(TableViewColumnAutoWidthMode?), typeof(TableViewColumn), new PropertyMetadata(null, OnColumnAutoWidthModeChanged));
+
+    /// <summary>
     /// Identifies the CanResize dependency property.
     /// </summary>
     public static readonly DependencyProperty CanResizeProperty = DependencyProperty.Register(nameof(CanResize), typeof(bool), typeof(TableViewColumn), new PropertyMetadata(true));
@@ -573,7 +657,7 @@ public abstract partial class TableViewColumn : DependencyObject
     /// <summary>
     /// Identifies the IsReadOnly dependency property.
     /// </summary>
-    public static readonly DependencyProperty IsReadOnlyProperty = DependencyProperty.Register(nameof(IsReadOnly), typeof(bool), typeof(TableViewColumn), new PropertyMetadata(false, OnPropertyChanged));
+    public static readonly DependencyProperty IsReadOnlyProperty = DependencyProperty.Register(nameof(IsReadOnly), typeof(bool), typeof(TableViewColumn), new PropertyMetadata(false, OnIsReadOnlyChanged));
 
     /// <summary>
     /// Identifies the Visibility dependency property.

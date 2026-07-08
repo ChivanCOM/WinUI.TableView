@@ -1,5 +1,6 @@
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -28,7 +29,6 @@ namespace WinUI.TableView;
 #endif
 public partial class TableViewCell : ContentControl
 {
-    private TableViewColumn? _column;
     private ScrollViewer? _scrollViewer;
     private ContentPresenter? _contentPresenter;
     private Border? _selectionBorder;
@@ -65,6 +65,13 @@ public partial class TableViewCell : ContentControl
     {
         if (!e.TryGetPosition(sender, out var position)) return;
 #endif
+
+        // Select the cell before showing the Context Menu
+        if (TableView is not null && TableView.ForceRowOrCellSelectionOnContextRequested && !IsSelected)
+        {
+            TableView.MakeSelection(Slot, false);
+        }
+
         e.Handled = TableView?.ShowCellContext(this, position) is true;
     }
 
@@ -111,7 +118,7 @@ public partial class TableViewCell : ContentControl
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
-        if (Column is not null && Row is not null && _contentPresenter is not null && Content is FrameworkElement element)
+        if (TableView is not null && Column is not null && Row is not null && _contentPresenter is not null && Content is FrameworkElement element)
         {
             if (Column is TableViewTemplateColumn)
             {
@@ -132,16 +139,20 @@ public partial class TableViewCell : ContentControl
 
             element.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
 
-            var desiredWidth = element.DesiredSize.Width;
-            desiredWidth += Padding.Left;
-            desiredWidth += Padding.Right;
-            desiredWidth += BorderThickness.Left;
-            desiredWidth += BorderThickness.Right;
-            desiredWidth += _selectionBorder?.BorderThickness.Right ?? 0;
-            desiredWidth += _selectionBorder?.BorderThickness.Left ?? 0;
-            desiredWidth += _v_gridLine?.ActualWidth ?? 0d;
+            var autoSizeMode = Column.ColumnAutoWidthMode ?? TableView.ColumnAutoWidthMode;
+            if (autoSizeMode is TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both)
+            {
+                var desiredWidth = element.DesiredSize.Width;
+                desiredWidth += Padding.Left;
+                desiredWidth += Padding.Right;
+                desiredWidth += BorderThickness.Left;
+                desiredWidth += BorderThickness.Right;
+                desiredWidth += _selectionBorder?.BorderThickness.Right ?? 0;
+                desiredWidth += _selectionBorder?.BorderThickness.Left ?? 0;
+                desiredWidth += _v_gridLine?.ActualWidth ?? 0d;
 
-            Column.DesiredWidth = Math.Max(Column.DesiredWidth, desiredWidth);
+                Column.DesiredWidth = Math.Max(Column.DesiredWidth, desiredWidth);
+            }
 
             #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
             var contentWidth = Column.ActualWidth;
@@ -243,6 +254,14 @@ public partial class TableViewCell : ContentControl
             TableView.SelectionStartCellSlot = TableView.SelectionUnit is not TableViewSelectionUnit.Row || !IsReadOnly ? Slot : default;
             TableView.SelectionStartRowIndex = Index;
             CapturePointer(e.Pointer);
+
+            // Start drag selection (auto-scroll + optional rectangle visual)
+            var point = e.GetCurrentPoint(this).Position;
+            var canvasPoint = TransformPointToCanvas(point);
+            if (canvasPoint.HasValue)
+            {
+                TableView.StartDragSelection(canvasPoint.Value);
+            }
         }
     }
 
@@ -258,9 +277,18 @@ public partial class TableViewCell : ContentControl
             TableView.SelectionStartRowIndex = cell?.Slot.Row;
         }
 
+        TableView?.EndDragSelection();
         ReleasePointerCaptures();
 
         e.Handled = true;
+    }
+
+    /// <inheritdoc/>
+    protected override void OnPointerCaptureLost(PointerRoutedEventArgs e)
+    {
+        base.OnPointerCaptureLost(e);
+
+        TableView?.EndDragSelection();
     }
 
     /// <inheritdoc/>
@@ -270,6 +298,19 @@ public partial class TableViewCell : ContentControl
 
         if (PointerCaptures?.Any() is true)
         {
+            // Update drag rectangle visual and auto-scroll
+            if (TableView?.IsDragSelecting is true)
+            {
+                var canvasPoint = TransformPointToCanvas(e.Position);
+                if (canvasPoint.HasValue)
+                {
+                    TableView.UpdateDragRectangleVisual(canvasPoint.Value);
+                }
+            }
+
+            // Selection via FindCell — same proven path whether rectangle is on or off.
+            // When the pointer is outside the viewport, FindCell returns null and selection
+            // is updated by the ViewChanged handler on the next auto-scroll tick.
             var cell = FindCell(e.Position);
 
             if (cell is not null && cell.Slot != TableView?.CurrentCellSlot)
@@ -328,6 +369,24 @@ public partial class TableViewCell : ContentControl
 #endif
                                .OfType<TableViewCell>()
                                .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Transforms a point relative to this cell to coordinates relative to the drag rectangle canvas.
+    /// </summary>
+    private Point? TransformPointToCanvas(Point position)
+    {
+        if (TableView?.DragRectangleCanvas is null) return null;
+
+        try
+        {
+            var transform = TransformToVisual(TableView.DragRectangleCanvas);
+            return transform.TransformPoint(position);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
     }
 
     /// <inheritdoc/>
@@ -490,6 +549,8 @@ public partial class TableViewCell : ContentControl
             Focus(FocusState.Pointer);
         });
 #endif
+
+        DispatcherQueue.TryEnqueue(InvalidateMeasure);
     }
 
     /// <summary>
@@ -512,12 +573,12 @@ public partial class TableViewCell : ContentControl
     /// <summary>
     /// Applies the current cell state to the cell.
     /// </summary>
-    internal async void ApplyCurrentCellState()
+    internal async void ApplyCurrentCellState(bool skipFocus = false)
     {
         var stateName = IsCurrent ? VisualStates.StateCurrent : VisualStates.StateRegular;
         VisualStates.GoToState(this, false, stateName);
 
-        if (IsCurrent)
+        if (IsCurrent && !skipFocus)
         {
             Focus(FocusState.Pointer);
 
@@ -595,7 +656,7 @@ public partial class TableViewCell : ContentControl
     /// the template-column "no editing template" shortcut.
     /// </summary>
     public bool IsReadOnly => TableView?.IsReadOnly is true
-        || Column is TableViewTemplateColumn { EditingTemplate: null } or { IsReadOnly: true }
+        || Column is TableViewTemplateColumn { EditingTemplate: null, EditingTemplateSelector: null } or { IsReadOnly: true }
         || (Column?.IsCellReadOnlyForRow?.Invoke(DataContext) ?? false);
 
     /// <summary>
@@ -623,12 +684,12 @@ public partial class TableViewCell : ContentControl
     /// </summary>
     public TableViewColumn? Column
     {
-        get => _column;
+        get;
         internal set
         {
-            if (_column != value)
+            if (field != value)
             {
-                _column = value;
+                field = value;
                 OnColumnChanged();
             }
         }
@@ -643,4 +704,10 @@ public partial class TableViewCell : ContentControl
     /// Gets or sets the TableView for the cell.
     /// </summary>
     public TableView? TableView { get; internal set; }
+
+    /// <inheritdoc/>
+    protected override AutomationPeer OnCreateAutomationPeer()
+    {
+        return new AutomationPeers.TableViewCellAutomationPeer(this);
+    }
 }

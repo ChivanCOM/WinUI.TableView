@@ -1,29 +1,50 @@
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Media;
-using Microsoft.Extensions.Logging;
-#if !WINDOWS
-using Uno.Resizetizer;
-#endif
 
 namespace WinUI.TableView.SampleApp;
 
 public partial class App : Application
 {
-    private readonly Lazy<Window> _mainWindow = new(() => new Window());
-    private readonly Lazy<MainPage> _mainPage = new(() => new MainPage());
+    private readonly Lazy<MainWindow> _mainWindow = new(() => new MainWindow());
 
+    /// <summary>
+    /// Initializes the singleton application object.  This is the first line of authored code
+    /// executed, and as such is the logical equivalent of main() or WinMain().
+    /// </summary>
     public App()
     {
         InitializeComponent();
+
+#if DEBUG && WINDOWS
+        DebugSettings.BindingFailed += DebugSettings_BindingFailed;
+        DebugSettings.XamlResourceReferenceFailed += DebugSettings_XamlResourceReferenceFailed;
+        UnhandledException += App_UnhandledException;
+#endif
     }
 
+#if DEBUG && WINDOWS
+    private void DebugSettings_BindingFailed(object sender, BindingFailedEventArgs e)
+    {
+        System.Diagnostics.Debug.WriteLine(e.Message);
+    }
+
+    private void DebugSettings_XamlResourceReferenceFailed(DebugSettings sender, XamlResourceReferenceFailedEventArgs args)
+    {
+        System.Diagnostics.Debug.WriteLine(args.Message);
+    }
+
+    private void App_UnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+        if (System.Diagnostics.Debugger.IsAttached) System.Diagnostics.Debugger.Break();
+    }
+#endif
+
+    /// <summary>
+    /// Invoked when the application is launched.
+    /// </summary>
+    /// <param name="args">Details about the launch request and process.</param>
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-#if WINDOWS
-        MainWindow.ExtendsContentIntoTitleBar = true;
-        MainWindow.SystemBackdrop = new MicaBackdrop();
-#endif
-        MainWindow.Content = MainPage;
 #if DEBUG && !WINDOWS
         MainWindow.UseStudio();
         MainWindow.SetWindowIcon();
@@ -62,8 +83,6 @@ public partial class App : Application
 #endif
     }
 
-
-    public MainPage MainPage => _mainPage.Value;
-    public Window MainWindow => _mainWindow.Value;
+    public MainWindow MainWindow => _mainWindow.Value;
     public static new App Current => (App)Application.Current;
 }
