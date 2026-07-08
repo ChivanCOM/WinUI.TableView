@@ -17,6 +17,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
+using Windows.Foundation.Collections;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.System;
@@ -70,6 +71,9 @@ public partial class TableView : ListView
 
         base.ItemsSource = _collectionView;
         base.SelectionMode = SelectionMode;
+#if !WINDOWS
+        HookUnoVectorChanged(_collectionView);
+#endif
 
         SetValue(ConditionalCellStylesProperty, new TableViewConditionalCellStylesCollection());
         RegisterPropertyChangedCallback(ItemsControl.ItemsSourceProperty, OnBaseItemsSourceChanged);
@@ -837,16 +841,64 @@ public partial class TableView : ListView
             SwapItemsSource(new CollectionView());
         }
 
-        using var defer = _collectionView.DeferRefresh();
-        _collectionView.Source = null!;
-
-        if (e.NewValue is IEnumerable source)
+        using (_collectionView.DeferRefresh())
         {
-            EnsureAutoColumns();
+            _collectionView.Source = null!;
 
-            _collectionView.Source = source;
+            if (e.NewValue is IEnumerable source)
+            {
+                EnsureAutoColumns();
+
+                _collectionView.Source = source;
+            }
         }
+
     }
+
+#if !WINDOWS
+    // FOBO fork, Uno-only. The in-memory CollectionView deliberately raises ONLY the WinRT
+    // IObservableVector.VectorChanged event (its INotifyCollectionChanged add/remove is a
+    // no-op — see CollectionView.Events.cs). Windows' ListView consumes VectorChanged, but
+    // Uno's ListView ignores it from a custom ICollectionView: with the ctor-assigned
+    // instance reused across source changes, nothing ever invalidates item realization —
+    // Items.Count is right, headers render, yet zero TableViewRows appear, and later
+    // in-place mutations (e.g. a tree-grid expand/collapse inserting/removing rows) do
+    // nothing visually. Cheapest reliable remedy: coalesce every VectorChanged burst into
+    // one re-point of base.ItemsSource on the dispatcher, which forces Uno's ListView to
+    // re-read the source. Custom ITableViewItemsSource implementations get the same hookup
+    // via SwapItemsSource.
+    private bool _unoRefreshQueued;
+
+    private void HookUnoVectorChanged(ITableViewItemsSource source)
+        => source.VectorChanged += OnUnoVectorChanged;
+
+    private void UnhookUnoVectorChanged(ITableViewItemsSource source)
+        => source.VectorChanged -= OnUnoVectorChanged;
+
+    private void OnUnoVectorChanged(object? sender, IVectorChangedEventArgs e)
+    {
+        if (_unoRefreshQueued)
+        {
+            return;
+        }
+
+        _unoRefreshQueued = true;
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            _unoRefreshQueued = false;
+            _allowInternalBaseItemsSourceSet = true;
+            try
+            {
+                base.ItemsSource = null;
+                base.ItemsSource = _collectionView;
+            }
+            finally
+            {
+                _allowInternalBaseItemsSourceSet = false;
+            }
+        });
+    }
+#endif
 
     /// <summary>
     /// FOBO fork: swap the active items-source. Detaches event handlers
@@ -864,6 +916,10 @@ public partial class TableView : ListView
     private void SwapItemsSource(ITableViewItemsSource newSource)
     {
         _collectionView.ItemPropertyChanged -= OnItemPropertyChanged;
+#if !WINDOWS
+        UnhookUnoVectorChanged(_collectionView);
+        HookUnoVectorChanged(newSource);
+#endif
         _collectionView = newSource;
         _allowInternalBaseItemsSourceSet = true;
         try
