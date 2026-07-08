@@ -60,19 +60,20 @@ public sealed class TreeGridFlattener<T> where T : class, ITreeGridRow, INotifyP
         if (index < 0)
             return;
 
+        // Drop the row's contiguous descendant block first, identified by DEPTH —
+        // never by expand state: IsExpanded has already flipped by the time this
+        // handler runs (counting "visible" descendants of a now-collapsed row
+        // yields zero, which left the children in place and duplicated them on
+        // the next expand). Removing up-front also makes expand idempotent.
+        var next = index + 1;
+        while (next < Flat.Count && Flat[next].Depth > row.Depth)
+            Flat.RemoveAt(next);
+
         if (row.IsExpanded)
         {
             var i = index + 1;
             foreach (var child in _childrenOf(row))
-            {
                 InsertVisible(child, ref i);
-            }
-        }
-        else
-        {
-            var count = CountVisibleDescendants(row);
-            for (var k = 0; k < count; k++)
-                Flat.RemoveAt(index + 1);
         }
     }
 
@@ -87,14 +88,4 @@ public sealed class TreeGridFlattener<T> where T : class, ITreeGridRow, INotifyP
         }
     }
 
-    /// <summary>How many descendants of <paramref name="row"/> are currently visible.</summary>
-    private int CountVisibleDescendants(T row)
-    {
-        if (!row.IsExpanded)
-            return 0;
-        var n = 0;
-        foreach (var child in _childrenOf(row))
-            n += 1 + CountVisibleDescendants(child);
-        return n;
-    }
 }

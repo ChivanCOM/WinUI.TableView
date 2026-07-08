@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- Repo uses central package management for the lib; this standalone test project
+         pins its own test-stack versions. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <!-- Not part of the WinUI test harness: the tree kit is pure .NET, so these tests
+         compile-link the sources directly and run everywhere (macOS/Linux/CI), unlike
+         tests/ which needs a Windows WinUI host. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\src\Tree\ITreeGridRow.cs" />
+    <Compile Include="..\src\Tree\TreeGridFlattener.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

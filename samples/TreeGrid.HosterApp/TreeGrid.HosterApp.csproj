@@ -1,0 +1,23 @@
+<Project Sdk="Uno.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>$(NetVersion)-desktop</TargetFrameworks>
+
+    <OutputType>Exe</OutputType>
+    <UnoSingleProject>true</UnoSingleProject>
+
+    <ApplicationTitle>TreeGrid Hoster</ApplicationTitle>
+    <ApplicationId>com.fobo.treegrid.hoster</ApplicationId>
+    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationPublisher>FOBO</ApplicationPublisher>
+    <Description>Interactive host + on-launch self-test for the FOBO tree-grid additions (TableViewTreeColumn + TreeGridFlattener).</Description>
+
+    <UnoFeatures>
+      SkiaRenderer;
+    </UnoFeatures>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WinUI.TableView.csproj" />
+  </ItemGroup>
+</Project>
