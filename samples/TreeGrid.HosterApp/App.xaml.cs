@@ -19,8 +19,14 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        MainWindow = new Window { Title = "TreeGrid Hoster" };
-        MainWindow.Content = new HosterView();
+        // --virtual (or HOSTER_MODE=virtual) hosts the VirtualTreeItemsSource playground —
+        // the paged, latency-simulating stack the library grid runs; default hosts the
+        // in-memory flattener playground.
+        var virtualMode = Environment.GetCommandLineArgs().Contains("--virtual")
+            || Environment.GetEnvironmentVariable("HOSTER_MODE") == "virtual";
+
+        MainWindow = new Window { Title = virtualMode ? "TreeGrid Hoster (virtual)" : "TreeGrid Hoster" };
+        MainWindow.Content = virtualMode ? new VirtualHosterView() : new HosterView();
         if (MainWindow.Content is FrameworkElement root)
             root.RequestedTheme = ElementTheme.Dark;
         MainWindow.Activate();

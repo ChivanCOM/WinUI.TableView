@@ -102,6 +102,15 @@ public partial class TableView : ListView
         RegisterPropertyChangedCallback(ItemsControl.ItemsSourceProperty, OnBaseItemsSourceChanged);
         RegisterPropertyChangedCallback(ListViewBase.SelectionModeProperty, OnBaseSelectionModeChanged);
 
+        // Pointer events carry the LIVE OS modifier state. InputKeyboardSource's tracked state
+        // goes stale when the app is switched away mid-modifier (the KeyUp lands in the other
+        // app), leaving every later click acting as a shift/ctrl-click until the key is pressed
+        // again in this window — so pointer-driven selection reads these instead (see
+        // LastPointerKeyModifiers). handledEventsToo: cells handle these events.
+        AddHandler(PointerPressedEvent, new PointerEventHandler(OnAnyPointerForModifiers), handledEventsToo: true);
+        AddHandler(PointerMovedEvent, new PointerEventHandler(OnAnyPointerForModifiers), handledEventsToo: true);
+        AddHandler(PointerReleasedEvent, new PointerEventHandler(OnAnyPointerForModifiers), handledEventsToo: true);
+
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         SelectionChanged += TableView_SelectionChanged;
@@ -156,6 +165,16 @@ public partial class TableView : ListView
     protected override void PrepareContainerForItemOverride(DependencyObject element, object item)
     {
         base.PrepareContainerForItemOverride(element, item);
+
+#if !WINDOWS
+        // Re-anchor scheduling rides the panel's own rebuild: every prepare during the
+        // post-rebind container storm defers the nudge; quiescence means the rebuild is done
+        // and the nudge finally sticks (see RebindBaseItemsSource).
+        if (_unoReanchorPending)
+        {
+            ScheduleUnoReanchorCheck();
+        }
+#endif
 
         // Track the row as currently-realized. Added here (on realize), removed
         // in ClearContainerForItemOverride (on recycle) so _rows stays bounded
@@ -622,7 +641,7 @@ public partial class TableView : ListView
     private void OnScrollContentPresenterPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
         var pointerPoint = e.GetCurrentPoint(this);
-        var isShiftButton = KeyboardHelper.IsShiftKeyDown();
+        var isShiftButton = e.KeyModifiers.HasFlag(VirtualKeyModifiers.Shift);
         var isHorizontalScroll = isShiftButton || pointerPoint.Properties.IsHorizontalMouseWheel;
 
         if (isHorizontalScroll && _scrollViewer?.ComputedHorizontalScrollBarVisibility is Visibility.Visible)
@@ -1107,17 +1126,7 @@ public partial class TableView : ListView
             {
                 _unoBurstNeedsRebind = false;
                 _unoChangedIndices.Clear();
-
-                _allowInternalBaseItemsSourceSet = true;
-                try
-                {
-                    base.ItemsSource = null;
-                    base.ItemsSource = _collectionView;
-                }
-                finally
-                {
-                    _allowInternalBaseItemsSourceSet = false;
-                }
+                RebindBaseItemsSource();
                 return;
             }
 
@@ -1126,6 +1135,111 @@ public partial class TableView : ListView
             PatchRealizedRows(changedIndices);
         });
     }
+
+    // Uno's ItemsStackPanel re-realizes a re-pointed source from ITEM 0 while the ScrollViewer
+    // keeps its old offset: every container lands above the viewport and the grid looks empty
+    // (the "disappearing rows" / blank band after a collapse while scrolled down). The panel
+    // only re-anchors to the offset on a VIEW CHANGE, and its rebuild finishes asynchronously
+    // whole seconds after the re-point — nudges fired in the first few hundred ms provably get
+    // wiped, while a double-nudge (offset−1, then offset a beat later; two DISTINCT offsets,
+    // same-offset ChangeView is a no-op) once things settle provably re-anchors. So repeat
+    // that double-nudge on a paced schedule across ~5s, driven by awaited UI-thread delays
+    // (a DispatcherTimer proved unreliable here), cancelled by the next rebind's generation
+    // bump or by the user scrolling away.
+    private double _unoReanchorOffset;
+    private int _unoReanchorGeneration;
+
+    private static readonly bool ReanchorTrace = Environment.GetEnvironmentVariable("TREEGRID_TRACE") == "1";
+
+    private void RebindBaseItemsSource()
+    {
+        _unoReanchorOffset = _scrollViewer?.VerticalOffset ?? 0;
+
+        _allowInternalBaseItemsSourceSet = true;
+        try
+        {
+            base.ItemsSource = null;
+            base.ItemsSource = _collectionView;
+        }
+        finally
+        {
+            _allowInternalBaseItemsSourceSet = false;
+        }
+
+        if (ReanchorTrace)
+                Console.WriteLine($"[reanchor] rebind offset={_unoReanchorOffset:F0} sv={(_scrollViewer is not null)}");
+        if (_unoReanchorOffset > 0 && _scrollViewer is not null)
+        {
+            _unoReanchorPending = true;
+            _unoReanchorSawPrepare = false;
+            // Fallback only: if the rebuild never prepares a container, still nudge eventually.
+            ChainUnoReanchorPass(++_unoReanchorStamp, passesLeft: 150);
+        }
+    }
+
+    private bool _unoReanchorPending;
+    private bool _unoReanchorSawPrepare;
+    private int _unoReanchorStamp;
+
+    /// <summary>Defers the re-anchor until the panel's container-prepare storm has been quiet
+    /// for a stretch of dispatcher passes — that is when the post-rebind rebuild is actually
+    /// done and a view change finally sticks. Driven by chained TryEnqueue passes: timers and
+    /// awaited delays created inside the rebind window provably stop firing.</summary>
+    private void ScheduleUnoReanchorCheck()
+    {
+        // Called per container prepare: the first one marks the rebuild as underway; each
+        // one restarts the quiescence countdown.
+        _unoReanchorSawPrepare = true;
+        var stamp = ++_unoReanchorStamp;
+        ChainUnoReanchorPass(stamp, passesLeft: 12);
+    }
+
+    private void ChainUnoReanchorPass(int stamp, int passesLeft)
+    {
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            if (!_unoReanchorPending || stamp != _unoReanchorStamp)
+            {
+                return;   // a newer prepare re-scheduled the check, or nothing pending
+            }
+
+            if (passesLeft > 0)
+            {
+                ChainUnoReanchorPass(stamp, passesLeft - 1);
+                return;
+            }
+
+            _unoReanchorPending = false;
+            if (_scrollViewer is not { } sv)
+            {
+                return;
+            }
+
+            var target = Math.Min(_unoReanchorOffset, Math.Max(0, sv.ScrollableHeight));
+        if (ReanchorTrace)
+                Console.WriteLine($"[reanchor] quiescent nudge offset={sv.VerticalOffset:F0} target={target:F0} scrollable={sv.ScrollableHeight:F0}");
+
+            sv.ChangeView(null, Math.Max(0, target - 1), null, disableAnimation: true);
+            RestoreUnoReanchorTarget(target, passesLeft: 5);
+        });
+    }
+
+    private void RestoreUnoReanchorTarget(double target, int passesLeft)
+    {
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            if (passesLeft > 0)
+            {
+                RestoreUnoReanchorTarget(target, passesLeft - 1);
+                return;
+            }
+            if (_scrollViewer is { } sv)
+            {
+                sv.ChangeView(null, target, null, disableAnimation: true);
+            }
+        });
+    }
+
 
     // FIX B: refresh only the realized rows whose item object was replaced. Unrealized indices
     // need nothing — Uno's ListView reads the item through the IList indexer when it realizes a
@@ -1191,6 +1305,7 @@ public partial class TableView : ListView
         }
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
     }
+
 
     /// <summary>
     /// Ensures that columns are automatically generated based on the current state of the control.
@@ -1524,14 +1639,31 @@ public partial class TableView : ListView
     /// and never raises Tapped, so only <see cref="TableViewCell.OnManipulationDelta"/> runs,
     /// whose shift-semantics SelectRange ADDS to whatever was selected before.
     /// </summary>
-    internal void OnSelectionDragStart(int rowIndex)
+    internal void OnSelectionDragStart(int rowIndex, bool ctrlDown)
     {
         if (SelectionMode is ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended
-            && !KeyboardHelper.IsCtrlKeyDown())
+            && !ctrlDown)
         {
             ClearSelectionBeforePlainClick(rowIndex);
         }
     }
+
+    private void OnAnyPointerForModifiers(object sender, PointerRoutedEventArgs e)
+        => LastPointerKeyModifiers = e.KeyModifiers;
+
+    /// <summary>Modifier flags stamped on the most recent pointer event anywhere in the grid —
+    /// the stale-proof source for pointer-driven selection (see the ctor hookup comment).</summary>
+    internal VirtualKeyModifiers LastPointerKeyModifiers { get; private set; }
+
+    internal bool IsPointerShiftDown => LastPointerKeyModifiers.HasFlag(VirtualKeyModifiers.Shift);
+
+    internal bool IsPointerCtrlDown => LastPointerKeyModifiers.HasFlag(VirtualKeyModifiers.Control)
+#if !WINDOWS
+        // macOS: the multi-select click convention is Cmd-click, which surfaces as the
+        // Windows modifier flag.
+        || LastPointerKeyModifiers.HasFlag(VirtualKeyModifiers.Windows)
+#endif
+        ;
 
     /// <summary>
     /// Deselects all cells in the TableView.
@@ -2159,8 +2291,7 @@ public partial class TableView : ListView
 
             if (cell is not null && cell.Slot != CurrentCellSlot)
             {
-                var ctrlKey = KeyboardHelper.IsCtrlKeyDown();
-                MakeSelection(cell.Slot, true, ctrlKey);
+                MakeSelection(cell.Slot, true, IsPointerCtrlDown);
             }
         }
         catch (ArgumentException)

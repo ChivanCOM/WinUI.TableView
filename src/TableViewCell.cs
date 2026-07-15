@@ -249,7 +249,10 @@ public partial class TableViewCell : ContentControl
             return;
         }
 
-        if (!KeyboardHelper.IsShiftKeyDown() && TableView is not null)
+        // e.KeyModifiers, never KeyboardHelper, on pointer paths: the tracked key state goes
+        // stale when the app is switched away mid-modifier (alt/cmd-tab), turning every later
+        // click into a shift-click. The pointer event carries the live OS state.
+        if (!e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Shift) && TableView is not null)
         {
             TableView.SelectionStartCellSlot = TableView.SelectionUnit is not TableViewSelectionUnit.Row || !IsReadOnly ? Slot : default;
             TableView.SelectionStartRowIndex = Index;
@@ -257,7 +260,7 @@ public partial class TableViewCell : ContentControl
             // Uno: a moving click becomes a manipulation and Tapped never fires, so the
             // click path can't clear the previous selection — the press must (see
             // TableView.OnSelectionDragStart).
-            TableView.OnSelectionDragStart(Index);
+            TableView.OnSelectionDragStart(Index, TableView.IsPointerCtrlDown);
 #endif
             CapturePointer(e.Pointer);
 
@@ -280,7 +283,7 @@ public partial class TableViewCell : ContentControl
     {
         base.OnPointerReleased(e);
 
-        if (!KeyboardHelper.IsShiftKeyDown() && TableView is not null)
+        if (!e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Shift) && TableView is not null)
         {
             var cell = FindCell(e.GetCurrentPoint(this).Position);
             TableView.SelectionStartCellSlot = TableView.SelectionUnit is not TableViewSelectionUnit.Row || !IsReadOnly ? cell?.Slot : default;
@@ -392,8 +395,7 @@ public partial class TableViewCell : ContentControl
 
             if (cell is not null && cell.Slot != TableView?.CurrentCellSlot)
             {
-                var ctrlKey = KeyboardHelper.IsCtrlKeyDown();
-                TableView?.MakeSelection(cell.Slot, true, ctrlKey);
+                TableView?.MakeSelection(cell.Slot, true, TableView.IsPointerCtrlDown);
             }
         }
     }
@@ -532,8 +534,10 @@ public partial class TableViewCell : ContentControl
     /// </summary>
     private void MakeSelection()
     {
-        var shiftKey = KeyboardHelper.IsShiftKeyDown();
-        var ctrlKey = KeyboardHelper.IsCtrlKeyDown();
+        // Called from Tapped, which carries no modifiers — the press/release that produced the
+        // tap stamped TableView.LastPointerKeyModifiers, so that is the live state here.
+        var shiftKey = TableView?.IsPointerShiftDown ?? false;
+        var ctrlKey = TableView?.IsPointerCtrlDown ?? false;
 
         if (TableView is null || Column is null)
         {

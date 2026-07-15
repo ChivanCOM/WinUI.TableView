@@ -126,22 +126,34 @@ partial class TableView
     /// re-measure and then reproduce that scroll programmatically (a 1px hop and back) so the
     /// panel re-realizes immediately. Called from the tree column's chevron.
     /// </summary>
-    internal void RefreshAfterTreeToggle()
+    public async void RefreshAfterTreeToggle()
     {
         ItemsPanelRoot?.InvalidateMeasure();
 
         if (_scrollViewer is not { } sv)
             return;
 
-        // Defer so the collection change has settled, then nudge the scroll offset by a
-        // pixel and restore it on the next tick — two distinct offsets force the panel to
-        // re-realize, which a same-offset ChangeView would not.
-        DispatcherQueue?.TryEnqueue(() =>
+        var target = sv.VerticalOffset;
+        if (target <= 0)
+            return;
+
+        // Staged late double-nudges: the panel's post-rebind rebuild finishes asynchronously,
+        // and only a view change AFTER it lands re-anchors realization to the offset. Early
+        // nudges get wiped, so repeat at increasing delays; two DISTINCT offsets per nudge
+        // because a same-offset ChangeView is a no-op. Runs from the chevron's event context —
+        // timers created inside the rebind window itself provably stop firing.
+        foreach (var delayMs in new[] { 250, 800, 2000 })
         {
-            var y = sv.VerticalOffset;
-            sv.ChangeView(null, y > 0 ? y - 1 : 1, null, true);
-            DispatcherQueue?.TryEnqueue(() => sv.ChangeView(null, y, null, true));
-        });
+            await Task.Delay(delayMs);
+            if (_scrollViewer is not { } s || Math.Abs(s.VerticalOffset - target) > 300)
+                return;   // grid gone or the user scrolled away — their position wins
+
+            s.ChangeView(null, Math.Max(0, target - 1), null, disableAnimation: true);
+            await Task.Delay(60);
+            if (_scrollViewer is not { } s2)
+                return;
+            s2.ChangeView(null, target, null, disableAnimation: true);
+        }
     }
 }
 #endif

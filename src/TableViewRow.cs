@@ -164,7 +164,7 @@ public partial class TableViewRow : ListViewItem
             base.OnPointerPressed(e);
         }
 
-        if (!KeyboardHelper.IsShiftKeyDown() && TableView is not null)
+        if (!e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Shift) && TableView is not null)
         {
             TableView.SelectionStartRowIndex = Index;
         }
@@ -175,7 +175,7 @@ public partial class TableViewRow : ListViewItem
     {
         base.OnPointerReleased(e);
 
-        if (!KeyboardHelper.IsShiftKeyDown() && TableView is not null)
+        if (!e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Shift) && TableView is not null)
         {
             TableView.SelectionStartCellSlot = null;
             TableView.SelectionStartRowIndex = Index;

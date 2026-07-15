@@ -26,7 +26,12 @@ public sealed partial class DemoNode : ITreeGridRow, INotifyPropertyChanged
     public string Artist { get; }
     public string Title { get; }
     public List<DemoNode> Children { get; } = new();
-    public bool HasChildren => Children.Count > 0;
+
+    /// <summary>Virtual-leaf count (VirtualHosterView): tracks this group owns that are
+    /// paged in on demand rather than materialized as Children.</summary>
+    public int LeafCount { get; set; }
+
+    public bool HasChildren => Children.Count > 0 || LeafCount > 0;
     public string Glyph => HasChildren ? "📁" : "🎵";
 
     public bool IsExpanded
