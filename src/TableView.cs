@@ -72,6 +72,16 @@ public partial class TableView : ListView
     private double _dragStartVerticalOffset;
     private double _dragStartHorizontalOffset;
 
+    // FIX A (two-phase drag): a plain press ARMS a drag — records the start point and the
+    // scroll baseline — but does not ENGAGE it. Only real pointer travel past the cell's drag
+    // threshold promotes the armed press into an active drag-selection, so a click never
+    // subscribes ViewChanged, flashes the rectangle, or scrolls the current cell into view on
+    // release.
+    private bool _dragArmed;
+    private Point _armedDragStartPoint;
+    private double _armedDragVerticalOffset;
+    private double _armedDragHorizontalOffset;
+
     /// <summary>
     /// Initializes a new instance of the TableView class.
     /// </summary>
@@ -433,16 +443,39 @@ public partial class TableView : ListView
         var xScrollBar = _scrollViewer?.FindDescendant<ScrollBar>(sb => sb.Name is "HorizontalScrollBar2");
         var yScrollBar = _scrollViewer?.FindDescendant<ScrollBar>(sb => sb.Name is "VerticalScrollBar");
 
-        scrollPresenter?.PointerWheelChanged += OnScrollContentPresenterPointerWheelChanged;
+        // FIX C: re-hosting the grid (flyout, dock/undock, new window) re-raises the
+        // ScrollViewer's Loaded on the same template parts. Unsubscribe before subscribing so
+        // handlers don't accumulate — otherwise one wheel notch is applied N times and the
+        // visual tree is rewalked once per stale subscription.
+        if (scrollPresenter is not null)
+        {
+            scrollPresenter.PointerWheelChanged -= OnScrollContentPresenterPointerWheelChanged;
+            scrollPresenter.PointerWheelChanged += OnScrollContentPresenterPointerWheelChanged;
+        }
 
-        yScrollBar?.ValueChanged += (_, _) => SetValue(VerticalOffsetProperty, yScrollBar.Value);
+        if (yScrollBar is not null)
+        {
+            yScrollBar.ValueChanged -= OnVerticalScrollBarValueChanged;
+            yScrollBar.ValueChanged += OnVerticalScrollBarValueChanged;
+        }
 
+        // SetBinding replaces any existing binding, so re-running it on re-host is idempotent.
         xScrollBar?.SetBinding(RangeBase.ValueProperty, new Binding
         {
             Path = new PropertyPath(nameof(HorizontalOffset)),
             Mode = BindingMode.TwoWay,
             Source = this
         });
+    }
+
+    /// <summary>
+    /// Mirrors the vertical scroll bar's value onto <see cref="VerticalOffset"/>. A named handler
+    /// (not a lambda) so <see cref="OnScrollViewerLoaded"/> can unsubscribe it on re-host and stay
+    /// idempotent.
+    /// </summary>
+    private void OnVerticalScrollBarValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+    {
+        SetValue(VerticalOffsetProperty, e.NewValue);
     }
 
     /// <summary>
@@ -961,6 +994,17 @@ public partial class TableView : ListView
     // via SwapItemsSource.
     private bool _unoRefreshQueued;
 
+    // FIX B: a dispatcher-tick burst made up purely of CollectionChange.ItemChanged (the
+    // virtual tree source raises up to a page of these when a fetched leaf page lands — see
+    // VirtualTreeItemsSource.OnModelItemReplaced) is patched in place instead of re-pointing
+    // base.ItemsSource. A full re-point recycles the whole viewport and re-realizes every
+    // container, which is the direct cause of the "rows stay empty too long" jank. Anything
+    // structural in the burst (Reset / insert / remove), or a burst larger than the cap, still
+    // forces the full re-point.
+    private bool _unoBurstNeedsRebind;
+    private readonly HashSet<int> _unoChangedIndices = new();
+    private const int UnoInPlacePatchCap = 512;
+
     private void HookUnoVectorChanged(ITableViewItemsSource source)
         => source.VectorChanged += OnUnoVectorChanged;
 
@@ -969,6 +1013,24 @@ public partial class TableView : ListView
 
     private void OnUnoVectorChanged(object? sender, IVectorChangedEventArgs e)
     {
+        // Accumulate the burst's change kinds until the dispatcher drains it.
+        if (_unoBurstNeedsRebind)
+        {
+            // already committed to a rebind — no need to track individual indices
+        }
+        else if (e.CollectionChange is CollectionChange.ItemChanged)
+        {
+            _unoChangedIndices.Add((int)e.Index);
+            if (_unoChangedIndices.Count > UnoInPlacePatchCap)
+            {
+                _unoBurstNeedsRebind = true; // too many to patch cheaply — fall back to rebind
+            }
+        }
+        else
+        {
+            _unoBurstNeedsRebind = true; // Reset / insert / remove: structural, must re-point
+        }
+
         if (_unoRefreshQueued)
         {
             return;
@@ -978,17 +1040,60 @@ public partial class TableView : ListView
         DispatcherQueue?.TryEnqueue(() =>
         {
             _unoRefreshQueued = false;
-            _allowInternalBaseItemsSourceSet = true;
-            try
+
+            if (_unoBurstNeedsRebind)
             {
-                base.ItemsSource = null;
-                base.ItemsSource = _collectionView;
+                _unoBurstNeedsRebind = false;
+                _unoChangedIndices.Clear();
+
+                _allowInternalBaseItemsSourceSet = true;
+                try
+                {
+                    base.ItemsSource = null;
+                    base.ItemsSource = _collectionView;
+                }
+                finally
+                {
+                    _allowInternalBaseItemsSourceSet = false;
+                }
+                return;
             }
-            finally
-            {
-                _allowInternalBaseItemsSourceSet = false;
-            }
+
+            var changedIndices = new HashSet<int>(_unoChangedIndices);
+            _unoChangedIndices.Clear();
+            PatchRealizedRows(changedIndices);
         });
+    }
+
+    // FIX B: refresh only the realized rows whose item object was replaced. Unrealized indices
+    // need nothing — Uno's ListView reads the item through the IList indexer when it realizes a
+    // container, so it picks up the new object then (this in-place path relies on that
+    // read-through realization). For realized rows we re-seat the recycled container on the new
+    // object: DataContext is the source the cells' bindings resolve against, and setting Content
+    // drives OnContentChanged (which regenerates template-column cells).
+    private void PatchRealizedRows(HashSet<int> changedIndices)
+    {
+        // One pass over the realized rows, not one _rows scan per changed index: row.Index
+        // resolves through IndexFromContainer, and a landing page is a burst of up to 512
+        // indices against a whole viewport of realized rows. Unrealized indices need nothing —
+        // read-through realization covers them.
+        foreach (var row in _rows)
+        {
+            var index = row.Index;
+            if (index < 0 || index >= Items.Count || !changedIndices.Contains(index))
+            {
+                continue;
+            }
+
+            var item = Items[index];
+            if (ReferenceEquals(row.Content, item))
+            {
+                continue;
+            }
+
+            row.DataContext = item;
+            row.Content = item;
+        }
     }
 #endif
 
@@ -1240,6 +1345,16 @@ public partial class TableView : ListView
                 break;
             case ListViewSelectionMode.Multiple:
             case ListViewSelectionMode.Extended:
+                // FIX F: a cell-wise select-all materializes rows×columns slots. On a large
+                // virtualized source (~1M rows) that HashSet build walks the whole source and
+                // hangs the UI thread, so above a sane bound fall back to the O(1) logical row
+                // select-all (IsAllSelected flag) instead of enumerating every cell.
+                if (Items.Count > 100_000)
+                {
+                    SelectAllLogical();
+                    return;
+                }
+
                 SelectedCellRanges.Clear();
                 var selectionRange = new HashSet<TableViewCellSlot>();
 
@@ -1320,6 +1435,40 @@ public partial class TableView : ListView
 
         InvokeSelectionChanged(removed, []);
 #endif
+    }
+
+    /// <summary>
+    /// FOBO fork. A plain (modifier-less) click must end with exactly the clicked row
+    /// selected. On Windows the <c>SelectedIndex</c> assignment does that by itself; Uno's
+    /// <c>Selector</c> ADDS to <c>SelectedItems</c> in Multiple/Extended mode instead of
+    /// replacing, so each click grew the selection by one row. Clear explicitly first —
+    /// O(selected) via <see cref="ClearItemSelection"/>, never an index walk.
+    /// </summary>
+    private void ClearSelectionBeforePlainClick(int row)
+    {
+#if !WINDOWS
+        if (SelectedItems.Count > 0 && !(SelectedItems.Count == 1 && SelectedIndex == row))
+        {
+            ClearItemSelection();
+        }
+#endif
+    }
+
+    /// <summary>
+    /// FOBO fork, Uno path. Called from <see cref="TableViewCell.OnPointerPressed"/>: a plain
+    /// (no ctrl, no shift) press starts a NEW selection, whether it turns out to be a click or
+    /// a drag-select. The click-path clear in <see cref="SelectRows"/> is not enough on Uno —
+    /// once the pointer moves a few pixels the gesture recognizer treats it as a manipulation
+    /// and never raises Tapped, so only <see cref="TableViewCell.OnManipulationDelta"/> runs,
+    /// whose shift-semantics SelectRange ADDS to whatever was selected before.
+    /// </summary>
+    internal void OnSelectionDragStart(int rowIndex)
+    {
+        if (SelectionMode is ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended
+            && !KeyboardHelper.IsCtrlKeyDown())
+        {
+            ClearSelectionBeforePlainClick(rowIndex);
+        }
     }
 
     /// <summary>
@@ -1412,10 +1561,12 @@ public partial class TableView : ListView
         }
         else if ((!shiftKey && !ctrlKey && SelectedItems.Count <= 1) || SelectionMode is ListViewSelectionMode.Single)
         {
+            ClearSelectionBeforePlainClick(slot.Row);
             SelectionStartRowIndex = CurrentRowIndex = SelectedIndex = slot.Row;
         }
         else if ((!ctrlKey && !shiftKey) || !(SelectionMode is ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended))
         {
+            ClearSelectionBeforePlainClick(slot.Row);
             SelectionStartRowIndex = CurrentRowIndex = SelectedIndex = slot.Row;
         }
         else if (SelectionMode is ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended)
@@ -1627,10 +1778,55 @@ public partial class TableView : ListView
     }
 
     /// <summary>
+    /// FIX A: records where a plain press landed (and the scroll baseline) so a later drag can
+    /// span from the original point, WITHOUT engaging drag selection — no IsDragSelecting, no
+    /// ViewChanged subscription, no rectangle. A press that stays a click never enters drag
+    /// state. Promoted by <see cref="BeginArmedDragSelection"/> on the first real movement.
+    /// </summary>
+    /// <param name="startPoint">The starting point relative to the drag rectangle canvas.</param>
+    internal void ArmDragSelection(Point startPoint)
+    {
+        if (SelectionMode is not (ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended))
+        {
+            return;
+        }
+
+        _dragArmed = true;
+        _armedDragStartPoint = startPoint;
+        _armedDragVerticalOffset = _scrollViewer?.VerticalOffset ?? 0;
+        _armedDragHorizontalOffset = HorizontalOffset;
+    }
+
+    /// <summary>
+    /// FIX A: promotes an armed press into an active drag selection the first time the pointer
+    /// travels past the drag threshold. Idempotent — only the first call after arming engages.
+    /// The start point and scroll baseline come from arm time so the rectangle spans from where
+    /// the press happened. No-op when nothing is armed.
+    /// </summary>
+    internal void BeginArmedDragSelection()
+    {
+        if (!_dragArmed)
+        {
+            return;
+        }
+
+        _dragArmed = false;
+        StartDragSelection(_armedDragStartPoint, _armedDragVerticalOffset, _armedDragHorizontalOffset);
+    }
+
+    /// <summary>
     /// Starts drag selection tracking, auto-scroll, and optionally the drag rectangle visual.
     /// </summary>
     /// <param name="startPoint">The starting point relative to the drag rectangle canvas.</param>
     internal void StartDragSelection(Point startPoint)
+        => StartDragSelection(startPoint, _scrollViewer?.VerticalOffset ?? 0, HorizontalOffset);
+
+    /// <summary>
+    /// Engine for <see cref="StartDragSelection(Point)"/> and <see cref="BeginArmedDragSelection"/>.
+    /// Takes the scroll baseline explicitly so the armed path anchors the rectangle to the
+    /// offsets captured at press time.
+    /// </summary>
+    private void StartDragSelection(Point startPoint, double baseVerticalOffset, double baseHorizontalOffset)
     {
         if (SelectionMode is not (ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended))
         {
@@ -1645,8 +1841,8 @@ public partial class TableView : ListView
 
         IsDragSelecting = true;
         _lastDragCanvasPoint = startPoint;
-        _dragStartVerticalOffset = _scrollViewer?.VerticalOffset ?? 0;
-        _dragStartHorizontalOffset = HorizontalOffset;
+        _dragStartVerticalOffset = baseVerticalOffset;
+        _dragStartHorizontalOffset = baseHorizontalOffset;
 
         if (_scrollViewer is not null)
         {
@@ -1914,8 +2110,42 @@ public partial class TableView : ListView
     /// <summary>
     /// Ends drag selection tracking, auto-scroll, and hides the drag rectangle if visible.
     /// </summary>
+    /// <inheritdoc/>
+    protected override void OnPointerMoved(PointerRoutedEventArgs e)
+    {
+        base.OnPointerMoved(e);
+
+        // A drag-selection with no button down is not a drag-selection.
+        //
+        // If the window goes to the background mid-press, no release ever arrives: EndDragSelection is
+        // never called, IsDragSelecting stays true, and when the window comes back the grid is still
+        // "dragging" — so the next plain click extends a range instead of selecting the row. (Undocking
+        // and re-docking the player used to clear it, because that tore the grid down and rebuilt it.)
+        //
+        // The pointer itself is the source of truth: if it is moving over the grid without the button
+        // held, whatever gesture was in flight is over.
+        if (IsDragSelecting && !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            EndDragSelection();
+        }
+    }
+
+    /// <inheritdoc/>
+    protected override void OnLostFocus(RoutedEventArgs e)
+    {
+        base.OnLostFocus(e);
+
+        EndDragSelection();
+    }
+
     internal async void EndDragSelection()
     {
+        // FIX A: disarm any armed-but-not-engaged press first. A plain click that never
+        // crossed the threshold must not leave a stale armed start point behind for the next
+        // manipulation to promote. This runs before the IsDragSelecting early-return so every
+        // end path (release, capture lost, lost focus, no-button move, unload) disarms.
+        _dragArmed = false;
+
         if (!IsDragSelecting) return;
 
         StopAutoScroll();
@@ -2007,7 +2237,11 @@ public partial class TableView : ListView
         if (_scrollViewer is null || index < 0) return default!;
 
         var item = Items[index];
-        index = Items.IndexOf(item); // if the ItemsSource has duplicate items in it. ScrollIntoView will only bring first index of the item.
+        // FIX D: keep the caller's index — it is already valid (guarded above). On a virtualized
+        // source an unfetched leaf resolves to a shared placeholder whose Items.IndexOf is -1 (or
+        // a wrong duplicate index), and overwriting index with that silently broke PageDown/End
+        // and scrolling into a cold region. ContainerFromIndex(index) in the retry loop below
+        // needs the real index. (There is no "item without index" caller here to reconcile.)
         ScrollIntoView(item);
 
         var tries = 0;

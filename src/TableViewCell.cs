@@ -210,7 +210,7 @@ public partial class TableViewCell : ContentControl
     /// <inheritdoc/>
     protected override void OnPointerExited(PointerRoutedEventArgs e)
     {
-        base.OnPointerEntered(e);
+        base.OnPointerExited(e);
 
         if ((TableView?.SelectionMode is not ListViewSelectionMode.None
             && TableView?.SelectionUnit is not TableViewSelectionUnit.Row)
@@ -253,14 +253,24 @@ public partial class TableViewCell : ContentControl
         {
             TableView.SelectionStartCellSlot = TableView.SelectionUnit is not TableViewSelectionUnit.Row || !IsReadOnly ? Slot : default;
             TableView.SelectionStartRowIndex = Index;
+#if !WINDOWS
+            // Uno: a moving click becomes a manipulation and Tapped never fires, so the
+            // click path can't clear the previous selection — the press must (see
+            // TableView.OnSelectionDragStart).
+            TableView.OnSelectionDragStart(Index);
+#endif
             CapturePointer(e.Pointer);
 
-            // Start drag selection (auto-scroll + optional rectangle visual)
+            // FIX A: ARM the drag (record the start point + scroll baseline) but do not engage
+            // it. A plain click (press+release below the drag threshold) must never enter
+            // drag-selection state — no rectangle, no ViewChanged, no scroll on release. The
+            // first real movement in OnManipulationDelta promotes it via BeginArmedDragSelection.
             var point = e.GetCurrentPoint(this).Position;
             var canvasPoint = TransformPointToCanvas(point);
             if (canvasPoint.HasValue)
             {
-                TableView.StartDragSelection(canvasPoint.Value);
+                _dragOrigin = canvasPoint.Value;
+                TableView.ArmDragSelection(canvasPoint.Value);
             }
         }
     }
@@ -279,6 +289,7 @@ public partial class TableViewCell : ContentControl
 
         TableView?.EndDragSelection();
         ReleasePointerCaptures();
+        _dragOrigin = null;
 
         e.Handled = true;
     }
@@ -288,7 +299,53 @@ public partial class TableViewCell : ContentControl
     {
         base.OnPointerCaptureLost(e);
 
+        EndGesture();
+    }
+
+    /// <inheritdoc/>
+    protected override void OnLostFocus(RoutedEventArgs e)
+    {
+        base.OnLostFocus(e);
+
+        // The window went to the background mid-press: no release will ever arrive, so end it here or the
+        // grid comes back armed for a drag-selection nobody asked for.
+        EndGesture();
+    }
+
+    /// <summary>Ends whatever gesture was in flight and releases the pointer, however it ended.</summary>
+    private void EndGesture()
+    {
         TableView?.EndDragSelection();
+        ReleasePointerCaptures();
+        _dragOrigin = null;
+    }
+
+    /// <summary>Where the pointer went down, so a click can be told from a drag.</summary>
+    private Point? _dragOrigin;
+
+    /// <summary>
+    /// How far the pointer has to travel before a press becomes a drag-selection, in pixels. Below it
+    /// the gesture is a click: it selects the row it landed on and nothing else.
+    /// </summary>
+    private const double DragThreshold = 6;
+
+    /// <summary>True once the pointer has moved far enough from where it went down to mean a drag.</summary>
+    private bool HasLeftTheClick(Point position)
+    {
+        if (_dragOrigin is not { } origin)
+        {
+            return true;   // no origin recorded (keyboard, programmatic) — behave as before
+        }
+
+        if (TransformPointToCanvas(position) is not { } point)
+        {
+            return true;
+        }
+
+        var dx = point.X - origin.X;
+        var dy = point.Y - origin.Y;
+
+        return dx * dx + dy * dy >= DragThreshold * DragThreshold;
     }
 
     /// <inheritdoc/>
@@ -296,8 +353,26 @@ public partial class TableViewCell : ContentControl
     {
         base.OnManipulationDelta(e);
 
-        if (PointerCaptures?.Any() is true)
+        // A stale capture is not a drag. Tabbing away to another window leaves the pointer captured with
+        // no release ever arriving, and the next pointer move over the grid would then carry on selecting
+        // as though the button were still down. The origin is cleared whenever a gesture really ends, so
+        // its absence means there is no gesture.
+        if (PointerCaptures?.Any() is true && _dragOrigin is not null)
         {
+            // A click is not a drag. Uno raises a manipulation for a pointer that wobbles a pixel
+            // while the button is down, and every one of those used to extend the selection from the
+            // pressed row — so an ordinary click on a row selected a range. Nothing is selected, and
+            // no drag state is entered, until the pointer has actually travelled past the threshold.
+            if (!HasLeftTheClick(e.Position))
+            {
+                return;
+            }
+
+            // FIX A: the first real movement promotes the press armed in OnPointerPressed into an
+            // active drag-selection (IsDragSelecting, ViewChanged, rectangle from the original
+            // press point). Idempotent — a no-op on later deltas.
+            TableView?.BeginArmedDragSelection();
+
             // Update drag rectangle visual and auto-scroll
             if (TableView?.IsDragSelecting is true)
             {
@@ -543,11 +618,21 @@ public partial class TableViewCell : ContentControl
         Content = element;
 
 #if !WINDOWS
-        DispatcherQueue.TryEnqueue(async () =>
+        // FIX G: only steal focus for the current cell. SetElement runs on every cell element
+        // generation (realization/reorder), and focusing each freshly generated element — with
+        // BringIntoViewOnFocusChange — fought the scroll and stole focus from wherever the user
+        // was. Re-check after the delay in case the current cell moved on between enqueue and delay.
+        if (IsCurrent)
         {
-            await Task.Delay(20);
-            Focus(FocusState.Pointer);
-        });
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                await Task.Delay(20);
+                if (IsCurrent)
+                {
+                    Focus(FocusState.Pointer);
+                }
+            });
+        }
 #endif
 
         DispatcherQueue.TryEnqueue(InvalidateMeasure);

@@ -382,20 +382,29 @@ public partial class TableViewHeaderRow : Control
                 _selectAllCheckBox.IsChecked = null;
                 _selectAllCheckBox.IsEnabled = false;
             }
-            else if (TableView.SelectedItems.Count == TableView.Items.Count)
-            {
-                _selectAllCheckBox.IsChecked = true;
-                _selectAllCheckBox.IsEnabled = true;
-            }
-            else if (TableView.SelectedItems.Count > 0)
-            {
-                _selectAllCheckBox.IsChecked = null;
-                _selectAllCheckBox.IsEnabled = true;
-            }
             else
             {
-                _selectAllCheckBox.IsChecked = false;
-                _selectAllCheckBox.IsEnabled = true;
+                // FIX I: under the logical all-selected flag (huge virtualized sources)
+                // SelectedItems is empty, so SelectedItems.Count would show the checkbox
+                // unchecked while every row is selected. Drive the tri-state off
+                // EffectiveSelectedCount, which accounts for IsAllSelected + exclusions.
+                var selectedCount = TableView.EffectiveSelectedCount;
+
+                if (selectedCount >= TableView.Items.Count)
+                {
+                    _selectAllCheckBox.IsChecked = true;
+                    _selectAllCheckBox.IsEnabled = true;
+                }
+                else if (selectedCount > 0)
+                {
+                    _selectAllCheckBox.IsChecked = null;
+                    _selectAllCheckBox.IsEnabled = true;
+                }
+                else
+                {
+                    _selectAllCheckBox.IsChecked = false;
+                    _selectAllCheckBox.IsEnabled = true;
+                }
             }
         }
     }

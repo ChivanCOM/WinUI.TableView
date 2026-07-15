@@ -64,8 +64,13 @@ partial class TableView
 
         if (SelectedItems.Count == 0) return;
 
-        var selectedIndexes = SelectedItems.Select(Items.IndexOf).Order();
-        var start = selectedIndexes.First();
+        // FIX E: a selected leaf whose page was LRU-evicted resolves to IndexOf == -1; folding
+        // those in yields bogus ranges anchored at -1. Drop negatives before building ranges,
+        // and bail if nothing resolvable remains.
+        var selectedIndexes = SelectedItems.Select(Items.IndexOf).Where(i => i >= 0).Order().ToList();
+        if (selectedIndexes.Count == 0) return;
+
+        var start = selectedIndexes[0];
         var prev = start;
 
         foreach (var index in selectedIndexes)
@@ -112,5 +117,31 @@ partial class TableView
     }
 
     private new IList<ItemIndexRange> SelectedRanges { get; } = [];
+
+    /// <summary>
+    /// Repaints the rows after a tree row is expanded/collapsed. Uno-Skia's virtualizing
+    /// <c>ItemsStackPanel</c> does not re-arrange its realized containers when items are
+    /// removed from the bound collection (as <see cref="TreeGridFlattener{T}"/> does on
+    /// collapse), leaving a stale empty band above the rows until the user scrolls. Force a
+    /// re-measure and then reproduce that scroll programmatically (a 1px hop and back) so the
+    /// panel re-realizes immediately. Called from the tree column's chevron.
+    /// </summary>
+    internal void RefreshAfterTreeToggle()
+    {
+        ItemsPanelRoot?.InvalidateMeasure();
+
+        if (_scrollViewer is not { } sv)
+            return;
+
+        // Defer so the collection change has settled, then nudge the scroll offset by a
+        // pixel and restore it on the next tick — two distinct offsets force the panel to
+        // re-realize, which a same-offset ChangeView would not.
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            var y = sv.VerticalOffset;
+            sv.ChangeView(null, y > 0 ? y - 1 : 1, null, true);
+            DispatcherQueue?.TryEnqueue(() => sv.ChangeView(null, y, null, true));
+        });
+    }
 }
 #endif
