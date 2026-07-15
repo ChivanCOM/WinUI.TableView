@@ -1155,6 +1155,22 @@ public partial class TableView : ListView
     {
         _unoReanchorOffset = _scrollViewer?.VerticalOffset ?? 0;
 
+        // Capture the visible rows' items (top-down) BEFORE the re-point: whichever of them
+        // still resolves to an index afterwards anchors the viewport again. Skip contents
+        // whose IndexOf disagrees with the row (shared placeholders resolve to a duplicate).
+        _unoReanchorCandidates.Clear();
+        if (_unoReanchorOffset > 0 && _scrollViewer is { } svA)
+        {
+            foreach (var row in _rows
+                .Where(r => r.ActualHeight > 0 && r.Content is not null)
+                .Select(r => { try { return (Row: r, Y: r.TransformToVisual(svA).TransformPoint(new Point(0, 0)).Y); } catch (ArgumentException) { return (Row: r, Y: double.NaN); } })
+                .Where(t => !double.IsNaN(t.Y) && t.Y > -t.Row.ActualHeight && t.Y < svA.ViewportHeight)
+                .OrderBy(t => t.Y))
+            {
+                _unoReanchorCandidates.Add(row.Row.Content);
+            }
+        }
+
         _allowInternalBaseItemsSourceSet = true;
         try
         {
@@ -1215,30 +1231,60 @@ public partial class TableView : ListView
                 return;
             }
 
-            var target = Math.Min(_unoReanchorOffset, Math.Max(0, sv.ScrollableHeight));
-        if (ReanchorTrace)
-                Console.WriteLine($"[reanchor] quiescent nudge offset={sv.VerticalOffset:F0} target={target:F0} scrollable={sv.ScrollableHeight:F0}");
-
-            sv.ChangeView(null, Math.Max(0, target - 1), null, disableAnimation: true);
-            RestoreUnoReanchorTarget(target, passesLeft: 5);
+            RestoreAnchorViaLayouter();
         });
     }
 
-    private void RestoreUnoReanchorTarget(double target, int passesLeft)
+    private readonly List<object> _unoReanchorCandidates = new();
+
+    /// <summary>Re-anchors the rebuilt panel through the layouter's own
+    /// ScrollIntoViewCore(index) — the internal entry that sets the offset and
+    /// re-materializes in one pass (the public ScrollIntoView walks every
+    /// intermediate container; bare offset nudges get wiped by the rebuild).</summary>
+    private void RestoreAnchorViaLayouter()
     {
-        DispatcherQueue?.TryEnqueue(() =>
+        var anchorIndex = -1;
+        foreach (var item in _unoReanchorCandidates)
         {
-            if (passesLeft > 0)
+            anchorIndex = Items.IndexOf(item);
+            if (anchorIndex >= 0) break;
+        }
+        _unoReanchorCandidates.Clear();
+
+        try
+        {
+            object? layouter = null;
+            if (ItemsPanelRoot is { } panel)
             {
-                RestoreUnoReanchorTarget(target, passesLeft - 1);
+                var get = panel.GetType().GetMethod("Microsoft.UI.Xaml.Controls.IVirtualizingPanel.GetLayouter",
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    ?? panel.GetType().GetMethod("GetLayouter",
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                layouter = get?.Invoke(panel, null);
+            }
+
+            var core = layouter?.GetType().GetMethod("ScrollIntoViewCore",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+
+            if (ReanchorTrace)
+                Console.WriteLine($"[reanchor] layouter={layouter?.GetType().Name} core={core is not null} anchorIndex={anchorIndex}");
+
+            if (core is not null && anchorIndex >= 0)
+            {
+                core.Invoke(layouter, new object[] { anchorIndex, ScrollIntoViewAlignment.Leading });
                 return;
             }
-            if (_scrollViewer is { } sv)
-            {
-                sv.ChangeView(null, target, null, disableAnimation: true);
-            }
-        });
+        }
+        catch (Exception ex)
+        {
+            if (ReanchorTrace)
+                Console.WriteLine($"[reanchor] layouter anchor failed: {ex.Message}");
+        }
+
+        // Fallback: plain offset restore.
+        _scrollViewer?.ChangeView(null, Math.Min(_unoReanchorOffset, Math.Max(0, _scrollViewer.ScrollableHeight)), null, disableAnimation: true);
     }
+
 
 
     // FIX B: refresh only the realized rows whose item object was replaced. Unrealized indices

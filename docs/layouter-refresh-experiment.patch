@@ -1,0 +1,83 @@
+diff --git a/src/TableView.cs b/src/TableView.cs
+index c2f6e13..3a759e5 100644
+--- a/src/TableView.cs
++++ b/src/TableView.cs
+@@ -1219,8 +1219,8 @@ public partial class TableView : ListView
+         if (ReanchorTrace)
+                 Console.WriteLine($"[reanchor] quiescent nudge offset={sv.VerticalOffset:F0} target={target:F0} scrollable={sv.ScrollableHeight:F0}");
+ 
+-            sv.ChangeView(null, Math.Max(0, target - 1), null, disableAnimation: true);
+-            RestoreUnoReanchorTarget(target, passesLeft: 5);
++            RefreshVirtualizingLayout();
++            _ = target;
+         });
+     }
+ 
+diff --git a/src/Tableview.Uno.cs b/src/Tableview.Uno.cs
+index d0af2a9..7bf7791 100644
+--- a/src/Tableview.Uno.cs
++++ b/src/Tableview.Uno.cs
+@@ -126,33 +126,41 @@ partial class TableView
+     /// re-measure and then reproduce that scroll programmatically (a 1px hop and back) so the
+     /// panel re-realizes immediately. Called from the tree column's chevron.
+     /// </summary>
+-    public async void RefreshAfterTreeToggle()
++    public void RefreshAfterTreeToggle()
+     {
+-        ItemsPanelRoot?.InvalidateMeasure();
+-
+-        if (_scrollViewer is not { } sv)
+-            return;
++        // Invoke the layouter's own viewport reconciliation — the same pass a scroll
++        // triggers — instead of scroll-offset trickery (nudges get wiped mid-rebuild;
++        // ScrollIntoView walks every intermediate container). ManagedItemsStackPanel
++        // implements IVirtualizingPanel.GetLayouter(); the layouter's Refresh()
++        // re-materializes against the CURRENT offset.
++        RefreshVirtualizingLayout();
++    }
+ 
+-        var target = sv.VerticalOffset;
+-        if (target <= 0)
++    internal void RefreshVirtualizingLayout()
++    {
++        var panel = ItemsPanelRoot;
++        if (panel is null)
+             return;
+ 
+-        // Staged late double-nudges: the panel's post-rebind rebuild finishes asynchronously,
+-        // and only a view change AFTER it lands re-anchors realization to the offset. Early
+-        // nudges get wiped, so repeat at increasing delays; two DISTINCT offsets per nudge
+-        // because a same-offset ChangeView is a no-op. Runs from the chevron's event context —
+-        // timers created inside the rebind window itself provably stop firing.
+-        foreach (var delayMs in new[] { 250, 800, 2000 })
++        try
++        {
++            var getLayouter = panel.GetType().GetMethod(
++                "Microsoft.UI.Xaml.Controls.IVirtualizingPanel.GetLayouter",
++                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
++                ?? panel.GetType().GetMethod("GetLayouterCore",
++                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
++            var layouter = getLayouter?.Invoke(panel, null);
++            var refresh = layouter?.GetType().GetMethod("LightRefresh",
++                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
++            refresh?.Invoke(layouter, null);
++            if (ReanchorTrace)
++                Console.WriteLine($"[reanchor] layouter refresh panel={panel.GetType().Name} layouter={layouter?.GetType().Name} refresh={refresh is not null}");
++        }
++        catch (Exception ex)
+         {
+-            await Task.Delay(delayMs);
+-            if (_scrollViewer is not { } s || Math.Abs(s.VerticalOffset - target) > 300)
+-                return;   // grid gone or the user scrolled away — their position wins
+-
+-            s.ChangeView(null, Math.Max(0, target - 1), null, disableAnimation: true);
+-            await Task.Delay(60);
+-            if (_scrollViewer is not { } s2)
+-                return;
+-            s2.ChangeView(null, target, null, disableAnimation: true);
++            if (ReanchorTrace)
++                Console.WriteLine($"[reanchor] layouter refresh failed: {ex.Message}");
++            ItemsPanelRoot?.InvalidateMeasure();
+         }
+     }
+ }
