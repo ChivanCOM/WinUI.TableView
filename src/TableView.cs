@@ -466,6 +466,68 @@ public partial class TableView : ListView
             Mode = BindingMode.TwoWay,
             Source = this
         });
+
+        if (_scrollViewer is not null)
+        {
+            _scrollViewer.ViewChanged -= OnScrollViewerViewChangedForAutoWidth;
+            _scrollViewer.ViewChanged += OnScrollViewerViewChangedForAutoWidth;
+        }
+    }
+
+    // Cells-mode auto-width accumulates a running max of every realized cell's desired width,
+    // so on a huge source one long value anywhere in the scroll session widened its column
+    // forever. Once scrolling settles AND the viewport has moved at least a page since the
+    // last baseline, re-baseline the auto columns from the rows that are realized NOW
+    // (RefreshColumnsAutoWidth) so widths can shrink back — debounced so widths never move
+    // while the user is still scrolling.
+    private DispatcherTimer? _autoWidthRebaselineTimer;
+    private double _autoWidthBaselineOffset = double.NaN;
+
+    private void OnScrollViewerViewChangedForAutoWidth(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (e.IsIntermediate || IsDragSelecting || _scrollViewer is null)
+        {
+            return;
+        }
+
+        if (!double.IsNaN(_autoWidthBaselineOffset)
+            && Math.Abs(_scrollViewer.VerticalOffset - _autoWidthBaselineOffset) < _scrollViewer.ViewportHeight)
+        {
+            return;
+        }
+
+        if (_autoWidthRebaselineTimer is null)
+        {
+            _autoWidthRebaselineTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _autoWidthRebaselineTimer.Tick += OnAutoWidthRebaselineTick;
+        }
+
+        _autoWidthRebaselineTimer.Stop();
+        _autoWidthRebaselineTimer.Start();
+    }
+
+    private void OnAutoWidthRebaselineTick(object? sender, object e)
+    {
+        _autoWidthRebaselineTimer?.Stop();
+
+        if (_scrollViewer is null || IsDragSelecting)
+        {
+            return;
+        }
+
+        var columns = Columns.VisibleColumns
+            .Where(c => c.Width.IsAuto
+                && (c.ColumnAutoWidthMode ?? ColumnAutoWidthMode)
+                    is TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both)
+            .ToList();
+
+        if (columns.Count == 0)
+        {
+            return;
+        }
+
+        _autoWidthBaselineOffset = _scrollViewer.VerticalOffset;
+        RefreshColumnsAutoWidth(columns);
     }
 
     /// <summary>

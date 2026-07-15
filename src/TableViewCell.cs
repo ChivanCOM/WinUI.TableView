@@ -290,6 +290,7 @@ public partial class TableViewCell : ContentControl
         TableView?.EndDragSelection();
         ReleasePointerCaptures();
         _dragOrigin = null;
+        _lastHitCell = null;
 
         e.Handled = true;
     }
@@ -318,6 +319,7 @@ public partial class TableViewCell : ContentControl
         TableView?.EndDragSelection();
         ReleasePointerCaptures();
         _dragOrigin = null;
+        _lastHitCell = null;
     }
 
     /// <summary>Where the pointer went down, so a click can be told from a drag.</summary>
@@ -425,6 +427,17 @@ public partial class TableViewCell : ContentControl
             ? TableView.HorizontalGridLinesStrokeThickness : 0d;
     }
 
+    // Drag-selection calls FindCell on every manipulation delta, and a full include-all
+    // FindElementsInHostCoordinates over the ScrollViewer subtree per pointer move is the hot
+    // cost of dragging across a big viewport. Consecutive moves almost always stay inside the
+    // same cell, so remember the last hit and its bounds and only re-hit-test once the pointer
+    // leaves them — invalidated whenever the view scrolls (offsets are part of the cache) or
+    // the gesture ends (containers may recycle between gestures).
+    private TableViewCell? _lastHitCell;
+    private Rect _lastHitBounds;
+    private double _lastHitVerticalOffset;
+    private double _lastHitHorizontalOffset;
+
     /// <summary>
     /// Finds the cell at the specified position.
     /// </summary>
@@ -433,17 +446,46 @@ public partial class TableViewCell : ContentControl
         _scrollViewer ??= TableView?.FindDescendant<ScrollViewer>();
         if (_scrollViewer is null) return null;
 
-        var transformedPoint = TransformToVisual(null).TransformPoint(position);
+        try
+        {
+            var transformedPoint = TransformToVisual(null).TransformPoint(position);
+
+            if (_lastHitCell is { IsLoaded: true } cached
+                && ReferenceEquals(cached.TableView, TableView)
+                && _lastHitVerticalOffset == _scrollViewer.VerticalOffset
+                && _lastHitHorizontalOffset == (TableView?.HorizontalOffset ?? 0d)
+                && _lastHitBounds.Contains(transformedPoint))
+            {
+                return cached;
+            }
+
 #if WINDOWS
-        return VisualTreeHelper.FindElementsInHostCoordinates(transformedPoint, _scrollViewer)
+            var cell = VisualTreeHelper.FindElementsInHostCoordinates(transformedPoint, _scrollViewer)
 #else
-        return VisualTreeHelper.FindElementsInHostCoordinates(transformedPoint, _scrollViewer, true)
-                               .OfType<ContentPresenter>()
-                               .Where(x => x.Name is "Content")
-                               .Select(x => x.FindAscendant<TableViewCell>() is { } header ? header : default)
+            var cell = VisualTreeHelper.FindElementsInHostCoordinates(transformedPoint, _scrollViewer, true)
+                                       .OfType<ContentPresenter>()
+                                       .Where(x => x.Name is "Content")
+                                       .Select(x => x.FindAscendant<TableViewCell>() is { } header ? header : default)
 #endif
-                               .OfType<TableViewCell>()
-                               .FirstOrDefault();
+                                       .OfType<TableViewCell>()
+                                       .FirstOrDefault();
+
+            if (cell is not null)
+            {
+                _lastHitCell = cell;
+                _lastHitBounds = cell.TransformToVisual(null)
+                    .TransformBounds(new Rect(0, 0, cell.ActualWidth, cell.ActualHeight));
+                _lastHitVerticalOffset = _scrollViewer.VerticalOffset;
+                _lastHitHorizontalOffset = TableView?.HorizontalOffset ?? 0d;
+            }
+
+            return cell;
+        }
+        catch (ArgumentException)
+        {
+            // Element not in the visual tree during container recycling.
+            return null;
+        }
     }
 
     /// <summary>
