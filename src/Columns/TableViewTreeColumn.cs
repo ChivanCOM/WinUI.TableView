@@ -3,6 +3,9 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
 using System;
+#if !WINDOWS
+using WinUI.TableView.Extensions;
+#endif
 
 namespace WinUI.TableView;
 
@@ -22,12 +25,16 @@ namespace WinUI.TableView;
 /// </summary>
 public partial class TableViewTreeColumn : TableViewBoundColumn
 {
-    private const double IndentPerLevel = 16d;
+    private const double DefaultIndentPerLevel = 16d;
 
     public TableViewTreeColumn()
     {
         IsReadOnly = true;
     }
+
+    /// <summary>Pixels of indent each level of depth adds. A deep tree in a narrow column spends
+    /// all its width on indent, so a consumer can trade indent for room to read the names in.</summary>
+    public double IndentPerLevel { get; set; } = DefaultIndentPerLevel;
 
     /// <summary>Binding for the optional per-row icon glyph (string).</summary>
     public Binding? GlyphBinding { get; set; }
@@ -52,6 +59,7 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         {
             Path = new PropertyPath(nameof(ITreeGridRow.Depth)),
             Converter = DepthToIndentConverter.Instance,
+            ConverterParameter = IndentPerLevel,
         });
 
         var chevronText = new TextBlock
@@ -95,6 +103,11 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             if ((s as FrameworkElement)?.DataContext is ITreeGridRow row && row.HasChildren)
             {
                 row.IsExpanded = !row.IsExpanded;
+#if !WINDOWS
+                // Uno-Skia leaves a stale gap after the flattener removes/inserts rows;
+                // ask the owning TableView to re-realize the panel (no-op on WinUI).
+                (s as FrameworkElement)?.FindAscendant<TableView>()?.RefreshAfterTreeToggle();
+#endif
             }
         };
         panel.Children.Add(chevron);
@@ -145,7 +158,10 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         public static readonly DepthToIndentConverter Instance = new();
 
         public object Convert(object value, Type targetType, object parameter, string language)
-            => new Thickness(4 + IndentPerLevel * (value is int depth ? depth : 0), 0, 12, 0);
+        {
+            var perLevel = parameter is double p ? p : DefaultIndentPerLevel;
+            return new Thickness(4 + perLevel * (value is int depth ? depth : 0), 0, 12, 0);
+        }
 
         public object ConvertBack(object value, Type targetType, object parameter, string language)
             => throw new NotSupportedException();

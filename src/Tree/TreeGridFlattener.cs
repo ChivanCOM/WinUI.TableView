@@ -30,7 +30,7 @@ public sealed class TreeGridFlattener<T> where T : class, ITreeGridRow, INotifyP
         => _childrenOf = childrenOf;
 
     /// <summary>The flat projection — bind this to TableView.ItemsSource.</summary>
-    public ObservableCollection<T> Flat { get; } = new();
+    public BulkObservableCollection<T> Flat { get; } = new();
 
     /// <summary>Replaces the whole tree and rebuilds the flat view.</summary>
     public void SetRoots(IReadOnlyList<T> roots)
@@ -39,10 +39,26 @@ public sealed class TreeGridFlattener<T> where T : class, ITreeGridRow, INotifyP
             row.PropertyChanged -= OnRowPropertyChanged;
         _hooked.Clear();
 
-        Flat.Clear();
-        var i = 0;
+        // Build the whole projection first, then publish it in one shot. Inserting row by row
+        // would emit a notification per row (thousands on a large scan), which leaves a
+        // virtualizing panel with a stale layout.
+        var flat = new List<T>();
         foreach (var root in roots)
-            InsertVisible(root, ref i);
+            Collect(root, flat);
+
+        Flat.ReplaceAll(flat);
+    }
+
+    /// <summary>Appends <paramref name="row"/> and its visible descendants, hooking each.</summary>
+    private void Collect(T row, List<T> into)
+    {
+        into.Add(row);
+        Hook(row);
+        if (row.IsExpanded)
+        {
+            foreach (var child in _childrenOf(row))
+                Collect(child, into);
+        }
     }
 
     private void Hook(T row)
@@ -65,27 +81,24 @@ public sealed class TreeGridFlattener<T> where T : class, ITreeGridRow, INotifyP
         // handler runs (counting "visible" descendants of a now-collapsed row
         // yields zero, which left the children in place and duplicated them on
         // the next expand). Removing up-front also makes expand idempotent.
+        //
+        // Both the removal and the re-insert go through the batch API: dropping or adding a
+        // folder's children one at a time emits a notification per row, and the panel does not
+        // reflow cleanly through that storm (it leaves an empty gap where the block used to be).
+        var count = 0;
         var next = index + 1;
-        while (next < Flat.Count && Flat[next].Depth > row.Depth)
-            Flat.RemoveAt(next);
+        while (next + count < Flat.Count && Flat[next + count].Depth > row.Depth)
+            count++;
+
+        Flat.RemoveRange(next, count);
 
         if (row.IsExpanded)
         {
-            var i = index + 1;
+            var block = new List<T>();
             foreach (var child in _childrenOf(row))
-                InsertVisible(child, ref i);
+                Collect(child, block);
+
+            Flat.InsertRange(index + 1, block);
         }
     }
-
-    private void InsertVisible(T row, ref int index)
-    {
-        Flat.Insert(index++, row);
-        Hook(row);
-        if (row.IsExpanded)
-        {
-            foreach (var child in _childrenOf(row))
-                InsertVisible(child, ref index);
-        }
-    }
-
 }

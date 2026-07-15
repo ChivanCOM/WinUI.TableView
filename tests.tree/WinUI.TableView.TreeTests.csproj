@@ -15,7 +15,9 @@
 
   <ItemGroup>
     <Compile Include="..\src\Tree\ITreeGridRow.cs" />
+    <Compile Include="..\src\Tree\BulkObservableCollection.cs" />
     <Compile Include="..\src\Tree\TreeGridFlattener.cs" />
+    <Compile Include="..\src\Tree\VirtualTreeModel.cs" />
   </ItemGroup>
 
   <ItemGroup>
