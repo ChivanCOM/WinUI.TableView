@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Uno.UI; // UseStudio() — App MCP inspection channel (DEBUG only)
 
 namespace TreeGrid.HosterApp;
 
@@ -29,6 +30,10 @@ public partial class App : Application
         MainWindow.Content = virtualMode ? new VirtualHosterView() : new HosterView();
         if (MainWindow.Content is FrameworkElement root)
             root.RequestedTheme = ElementTheme.Dark;
+        // Uno Studio/RemoteControl channel so the App MCP can screenshot/inspect live.
+#if DEBUG
+        MainWindow.UseStudio(showHotReloadIndicator: false);
+#endif
         MainWindow.Activate();
     }
 }
