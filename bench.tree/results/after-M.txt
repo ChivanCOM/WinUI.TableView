@@ -1,0 +1,119 @@
+scale M: 1.000 artists × 10 albums, ~100.000 tracks, 11.000 group rows
+backend: 15ms/query, serialized (SQLite-like); pages 200 rows × 64 cached
+
+── cold-load ✓
+   SetRoots ms                            3,1
+   rows total                             111.002
+   first realize ms                       8,0
+   viewport full after ms                 73
+   visible-empty p50 ms                   50
+   visible-empty p95 ms                   66
+   visible-empty max ms                   66
+   abandoned-empty rows                   0
+   events R/I/D/repl                      1/0/0/34
+   fetches ok/cxl/fail                    4/0/0
+   worst UI block ms                      8,0 (cold-load/SetRoots)
+
+── wheel-sweep ✓
+   sweep wall ms                          8160
+   rows swept                             4.800
+   visible-empty p50 ms                   17
+   visible-empty p95 ms                   35
+   visible-empty max ms                   55
+   abandoned-empty rows                   0
+   events R/I/D/repl                      0/0/0/4334
+   fetches ok/cxl/fail                    432/0/0
+   worst UI block ms                      1,6 (wheel-sweep/step161)
+
+── thumb-jumps ✓
+   landing fill p50 ms                    102
+   landing fill p95 ms                    115
+   landing fill max ms                    118
+   fetches started                        258
+   visible-empty p50 ms                   69
+   visible-empty p95 ms                   102
+   visible-empty max ms                   118
+   abandoned-empty rows                   4262
+   events R/I/D/repl                      0/0/0/6423
+   fetches ok/cxl/fail                    634/0/0
+   worst UI block ms                      9,9 (thumb-jumps/quiesce)
+
+── expand-collapse ✓
+   collapse artist ms                     6,40
+   expand artist ms                       3,31
+   collapse-all ms                        315
+   expand-all ms                          61
+   200-toggle storm ms                    52
+   abandoned-empty rows                   0
+   events R/I/D/repl                      2114/0/821/0
+   fetches ok/cxl/fail                    0/0/0
+   worst UI block ms                      314,8 (expand-collapse/collapse-all)
+
+── search-storm ✓
+   skeleton swap max ms                   5,2
+   skeleton swap avg ms                   1,1
+   visible-empty p50 ms                   50
+   visible-empty p95 ms                   68
+   visible-empty max ms                   68
+   abandoned-empty rows                   0
+   events R/I/D/repl                      9/0/0/306
+   fetches ok/cxl/fail                    38/2/0
+   worst UI block ms                      5,2 (search-storm/key1)
+
+── collapse-midfetch ✓
+   re-expand fill ms                      0
+   visible-empty p50 ms                   9
+   visible-empty p95 ms                   16
+   visible-empty max ms                   16
+   abandoned-empty rows                   0
+   events R/I/D/repl                      40/0/0/38
+   fetches ok/cxl/fail                    4/0/0
+   worst UI block ms                      1,8 (collapse-midfetch/19)
+
+── fault-injection ✓
+   still-empty rows after 5s of retries   0
+   failed fetches                         1
+   visible-empty p50 ms                   68
+   visible-empty p95 ms                   154
+   visible-empty max ms                   154
+   abandoned-empty rows                   0
+   events R/I/D/repl                      1/0/0/34
+   fetches ok/cxl/fail                    4/0/1
+   worst UI block ms                      6,5 (collapse-midfetch/quiesce)
+
+── lru-thrash ✓
+   pages fetched                          1129
+   cached leaves now                      664
+   managed heap delta MB                  1,1
+   visible-empty p50 ms                   51
+   visible-empty p95 ms                   85
+   visible-empty max ms                   103
+   abandoned-empty rows                   0
+   events R/I/D/repl                      0/0/0/11462
+   fetches ok/cxl/fail                    1129/0/0
+   worst UI block ms                      0,4 (lru-thrash/247)
+
+── selection-ops ✓
+   IndexOf ×8000 (cached leaves) ms       19,6
+   IndexOf ×200 (last group) ms           6,9
+   PeekAt ×10k range ms                   3,1
+   abandoned-empty rows                   0
+   events R/I/D/repl                      0/0/0/0
+   fetches ok/cxl/fail                    4/0/0
+   worst UI block ms                      0,0 ()
+
+── leaf-update-storm ✓
+   relay 680 changes ms                   0,7
+   relayed                                680
+   abandoned-empty rows                   0
+   events R/I/D/repl                      0/0/0/0
+   fetches ok/cxl/fail                    4/0/0
+   worst UI block ms                      0,7 (leaf-update-storm)
+
+── flattener 500×100 ✓
+   SetRoots 50.500 rows ms                17,9
+   collapse front folder ms               0,4
+   expand front folder ms                 0,2
+   collapse-all 500 folders ms            3
+   expand-all 500 folders ms              19
+

@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <!-- Interaction/benchmark harness for the tree grid kit. Like tests.tree it
+         compile-links the UI-free sources directly, so it runs on macOS/Linux/CI
+         and always measures the CURRENT code in ..\src\Tree. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <TieredPgo>true</TieredPgo>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\src\Tree\ITreeGridRow.cs" />
+    <Compile Include="..\src\Tree\BulkObservableCollection.cs" />
+    <Compile Include="..\src\Tree\TreeGridFlattener.cs" />
+    <Compile Include="..\src\Tree\VirtualTreeModel.cs" />
+  </ItemGroup>
+
+</Project>
