@@ -169,9 +169,17 @@ public partial class TableView : ListView
 #if !WINDOWS
         // Post-rebind scroll restore rides the panel's own rebuild: prepares are the only
         // signal that provably fires in that window (see TryUnoReanchorRestore).
-        if (_unoReanchorPending && ++_unoReanchorPrepares % 8 == 0)
+        if (_unoReanchorPending)
         {
+            ++_unoReanchorPrepares;
             TryUnoReanchorRestore();
+        }
+        else if (_unoReseatBurstsLeft > 0)
+        {
+            // Recovery materialization continues after the verified restore; with a warm page
+            // cache no ItemChanged bursts arrive to drain the armed re-seats, so prepares do.
+            _unoReseatBurstsLeft--;
+            ReseatPanelRows();
         }
 #endif
 
@@ -503,6 +511,22 @@ public partial class TableView : ListView
 
     private void OnScrollViewerViewChangedForAutoWidth(object? sender, ScrollViewerViewChangedEventArgs e)
     {
+#if !WINDOWS
+        // Post-rebind restore also re-attempts on every view change: our own ChangeView
+        // attempts raise ViewChanged, so restore self-sustains even when container prepares
+        // stop (small viewports produce very few).
+        if (_unoReanchorPending)
+        {
+            TryUnoReanchorRestore();
+        }
+        else if (_unoFinalHopTarget >= 0 && _scrollViewer is { } svHop)
+        {
+            var hopTarget = _unoFinalHopTarget;
+            _unoFinalHopTarget = -1;
+            svHop.ChangeView(null, hopTarget, null, disableAnimation: true);
+            ReseatPanelRows();
+        }
+#endif
         if (e.IsIntermediate || IsDragSelecting || _scrollViewer is null)
         {
             return;
@@ -1132,6 +1156,12 @@ public partial class TableView : ListView
             var changedIndices = new HashSet<int>(_unoChangedIndices);
             _unoChangedIndices.Clear();
             PatchRealizedRows(changedIndices);
+
+            if (_unoReseatBurstsLeft > 0)
+            {
+                _unoReseatBurstsLeft--;
+                ReseatPanelRows();
+            }
         });
     }
 
@@ -1201,6 +1231,37 @@ public partial class TableView : ListView
     /// re-materializes correctly; retried every few prepares until the offset verifiably sits
     /// at the target (the extent may still be growing, re-clamping early attempts).</summary>
     private readonly List<object> _unoReanchorCandidates = new();
+    private int _unoReseatBurstsLeft;
+    private double _unoFinalHopTarget = -1;
+
+    /// <summary>Re-seats every panel child whose content no longer matches the source at its
+    /// index — walks the panel's children, NOT _rows, because recovery-recycled containers are
+    /// missing from _rows until something re-prepares them.</summary>
+    private void ReseatPanelRows()
+    {
+        if (ItemsPanelRoot is not { } panel)
+        {
+            return;
+        }
+        foreach (var child in panel.Children)
+        {
+            if (child is not TableViewRow row)
+            {
+                continue;
+            }
+            var index = row.Index;
+            if (index < 0 || index >= Items.Count)
+            {
+                continue;
+            }
+            var item = Items[index];
+            if (item is not null && !ReferenceEquals(row.Content, item))
+            {
+                row.DataContext = item;
+                row.Content = item;
+            }
+        }
+    }
 
     private void TryUnoReanchorRestore()
     {
@@ -1231,24 +1292,22 @@ public partial class TableView : ListView
             _unoReanchorPending = false;
             _unoReanchorCandidates.Clear();
 
-            // The large-scroll recovery recycles containers WITHOUT re-preparing them, so a
-            // container can sit at the right position still showing the placeholder it held
-            // before the rebind — and no ItemChanged will ever fix it (the page is already
-            // cached, the swap event fired long ago). Re-seat every mismatched realized row.
-            foreach (var row in _rows)
-            {
-                var index = row.Index;
-                if (index < 0 || index >= Items.Count)
-                {
-                    continue;
-                }
-                var item = Items[index];
-                if (item is not null && !ReferenceEquals(row.Content, item))
-                {
-                    row.DataContext = item;
-                    row.Content = item;
-                }
-            }
+            // The large-scroll recovery recycles containers WITHOUT re-preparing them: they
+            // hold stale content, get no ItemChanged (the swap event fired long ago for
+            // cached pages), and are absent from _rows (recycling removed them, no prepare
+            // re-added them). Re-seat from the PANEL's actual children, and stay armed for
+            // the next few fill bursts — pages fetched for the restored viewport land later
+            // and their patch pass misses these same unlisted containers.
+            ReseatPanelRows();
+            _unoReseatBurstsLeft = 5;
+
+            // Finish with the proven cure at the one moment it reliably works (extent settled,
+            // offset verified): a 1px hop whose ViewChanged forces the panel to re-realize the
+            // viewport through real prepares — recovery-recycled containers with stale content
+            // get re-prepared with the current source rows. The hop is restored by the
+            // ViewChanged handler below.
+            _unoFinalHopTarget = target;
+            sv.ChangeView(null, Math.Max(0, target - pitch), null, disableAnimation: true);
             return;
         }
 
