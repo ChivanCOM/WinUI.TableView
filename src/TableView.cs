@@ -172,7 +172,19 @@ public partial class TableView : ListView
         // and the nudge finally sticks (see RebindBaseItemsSource).
         if (_unoReanchorPending)
         {
-            ScheduleUnoReanchorCheck();
+            // Synchronous on purpose: dispatcher-scheduled work around the rebind window
+            // (chains, timers, delays) dies silently, but prepares provably run. A single
+            // early attempt lands on a half-built extent, so retry on a prepare ladder and
+            // stop once the offset verifiably sits at the anchor.
+            var n = ++_unoReanchorPrepares;
+            if (n == 8 || n == 32 || n == 128)
+            {
+                if (RestoreAnchorViaLayouter() || n == 128)
+                {
+                    _unoReanchorPending = false;
+                    _unoReanchorCandidates.Clear();
+                }
+            }
         }
 #endif
 
@@ -1187,6 +1199,7 @@ public partial class TableView : ListView
         if (_unoReanchorOffset > 0 && _scrollViewer is not null)
         {
             _unoReanchorPending = true;
+            _unoReanchorPrepares = 0;
             _unoReanchorSawPrepare = false;
             // Fallback only: if the rebuild never prepares a container, still nudge eventually.
             ChainUnoReanchorPass(++_unoReanchorStamp, passesLeft: 150);
@@ -1194,6 +1207,7 @@ public partial class TableView : ListView
     }
 
     private bool _unoReanchorPending;
+    private int _unoReanchorPrepares;
     private bool _unoReanchorSawPrepare;
     private int _unoReanchorStamp;
 
@@ -1241,7 +1255,7 @@ public partial class TableView : ListView
     /// ScrollIntoViewCore(index) — the internal entry that sets the offset and
     /// re-materializes in one pass (the public ScrollIntoView walks every
     /// intermediate container; bare offset nudges get wiped by the rebuild).</summary>
-    private void RestoreAnchorViaLayouter()
+    private bool RestoreAnchorViaLayouter()
     {
         var anchorIndex = -1;
         foreach (var item in _unoReanchorCandidates)
@@ -1249,7 +1263,6 @@ public partial class TableView : ListView
             anchorIndex = Items.IndexOf(item);
             if (anchorIndex >= 0) break;
         }
-        _unoReanchorCandidates.Clear();
 
         try
         {
@@ -1269,10 +1282,17 @@ public partial class TableView : ListView
             if (ReanchorTrace)
                 Console.WriteLine($"[reanchor] layouter={layouter?.GetType().Name} core={core is not null} anchorIndex={anchorIndex}");
 
-            if (core is not null && anchorIndex >= 0)
+            if (core is not null && anchorIndex >= 0 && _scrollViewer is { } svc)
             {
                 core.Invoke(layouter, new object[] { anchorIndex, ScrollIntoViewAlignment.Leading });
-                return;
+
+                // Anchored when the offset now sits within a viewport of where the anchor
+                // row belongs (pitch estimated from a live container).
+                var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
+                var ok = Math.Abs(svc.VerticalOffset - anchorIndex * pitch) < Math.Max(1, svc.ViewportHeight) * 2;
+                if (ReanchorTrace)
+                    Console.WriteLine($"[reanchor] after core: offset={svc.VerticalOffset:F0} expected~{anchorIndex * pitch:F0} ok={ok}");
+                return ok;
             }
         }
         catch (Exception ex)
@@ -1283,6 +1303,7 @@ public partial class TableView : ListView
 
         // Fallback: plain offset restore.
         _scrollViewer?.ChangeView(null, Math.Min(_unoReanchorOffset, Math.Max(0, _scrollViewer.ScrollableHeight)), null, disableAnimation: true);
+        return false;
     }
 
 
