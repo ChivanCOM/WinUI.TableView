@@ -67,6 +67,7 @@ public sealed class VirtualTreeModel
     private readonly Func<object?, int> _leafCountOf;
     private readonly FetchLeavesFn _fetchLeaves;
     private readonly Func<object?, object> _placeholderOf;
+    private readonly Func<object?, int, object>? _placeholderAtOf;
     private readonly int _pageSize;
     private readonly int _maxPagesCached;
     private readonly int _maxConcurrentFetches;
@@ -134,6 +135,7 @@ public sealed class VirtualTreeModel
         Func<object?, int> leafCountOf,
         FetchLeavesFn fetchLeaves,
         Func<object?, object> placeholderOf,
+        Func<object?, int, object>? placeholderAtOf = null,
         int pageSize = 200,
         int maxPagesCached = 64,
         int maxConcurrentFetches = 2,
@@ -143,6 +145,7 @@ public sealed class VirtualTreeModel
         _leafCountOf = leafCountOf;
         _fetchLeaves = fetchLeaves;
         _placeholderOf = placeholderOf;
+        _placeholderAtOf = placeholderAtOf;
         _pageSize = pageSize > 0 ? pageSize : throw new ArgumentOutOfRangeException(nameof(pageSize));
         _maxPagesCached = maxPagesCached > 0 ? maxPagesCached : throw new ArgumentOutOfRangeException(nameof(maxPagesCached));
         _maxConcurrentFetches = maxConcurrentFetches > 0 ? maxConcurrentFetches : throw new ArgumentOutOfRangeException(nameof(maxConcurrentFetches));
@@ -346,6 +349,9 @@ public sealed class VirtualTreeModel
         var inPage = local % _pageSize;
 
         var key = (seg.Group, page);
+        if (fetchIfMissing)
+            MaybePrefetchNeighbor(seg, local);
+
         if (_pages.TryGetValue(key, out var buffer))
         {
             TouchLru(key);
@@ -371,6 +377,57 @@ public sealed class VirtualTreeModel
         return PlaceholderAt(key, inPage);
     }
 
+    /// <summary>Sequential scrolling should meet pages that already arrived: when a read
+    /// lands within a quarter-page of a page edge, the adjacent page is queued at the BACK
+    /// of the fetch queue — it fills spare fetch capacity without ever delaying the page
+    /// the viewport is actually on.</summary>
+    private void MaybePrefetchNeighbor(Segment seg, int local)
+    {
+        var margin = Math.Max(1, _pageSize / 4);
+        var inPage = local % _pageSize;
+        var page = local / _pageSize;
+        var lastPage = (seg.Length - 1) / _pageSize;
+
+        if (inPage >= _pageSize - margin && page < lastPage)
+            QueuePrefetch((seg.Group, page + 1));
+        if (inPage < margin && page > 0)
+            QueuePrefetch((seg.Group, page - 1));
+
+        // Real collections are LUMPY: most folders hold fewer rows than a page, so every
+        // folder is its own leaf block and page-level prefetch never reaches the next one —
+        // each album boundary would flash placeholders. Nearing a block edge prefetches the
+        // adjacent block (skipping group rows, which are in-memory).
+        if (seg.Length - local <= margin)
+            PrefetchAdjacentBlock(seg.Start + seg.Length, forward: true);
+        if (local < margin && seg.Start > 0)
+            PrefetchAdjacentBlock(seg.Start - 1, forward: false);
+    }
+
+    private void PrefetchAdjacentBlock(int index, bool forward)
+    {
+        // A few hops: group rows (and possibly a childless group chain) sit between blocks.
+        for (var hop = 0; hop < 4 && index >= 0 && index < _count; hop++)
+        {
+            var seg = FindSegment(index);
+            if (seg.IsLeafBlock)
+            {
+                var page = (index - seg.Start) / _pageSize;
+                QueuePrefetch((seg.Group, page));
+                return;
+            }
+            index = forward ? seg.Start + seg.Length : seg.Start - 1;
+        }
+    }
+
+    private void QueuePrefetch((object? Group, int Page) key)
+    {
+        if (_pages.ContainsKey(key) || _pagesInFlight.Contains(key)
+            || _pendingNodes.ContainsKey(key) || InCooldown(key))
+            return;
+        _pendingNodes[key] = _pending.AddFirst(key);   // back of the LIFO: lowest priority
+        DrainPending();
+    }
+
     private object PlaceholderAt((object? Group, int Page) key, int inPage)
     {
         if (!_placeholderPages.TryGetValue(key, out var buffer))
@@ -379,7 +436,9 @@ public sealed class VirtualTreeModel
                 _placeholderPages.Clear();   // cheap bound; identities re-create on demand
             _placeholderPages[key] = buffer = new object?[_pageSize];
         }
-        return buffer[inPage] ??= _placeholderOf(key.Group);
+        return buffer[inPage] ??= _placeholderAtOf is { } withIndex
+            ? withIndex(key.Group, key.Page * _pageSize + inPage)
+            : _placeholderOf(key.Group);
     }
 
     private Segment FindSegment(int index)
