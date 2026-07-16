@@ -161,10 +161,19 @@ public partial class TableView : ListView
         row?.EnsureCellsStyle(default, sender);
     }
 
+    /// <summary>Diagnostics for the hoster's fling probe: container prepares per scroll hop
+    /// and the time spent inside them (stopwatch ticks).</summary>
+    public static int DiagPrepares;
+    public static long DiagPrepareTicks;
+    public static long DiagRowMeasureTicks;
+
     /// <inheritdoc/>
     protected override void PrepareContainerForItemOverride(DependencyObject element, object item)
     {
+        DiagPrepares++;
+        var diagT0 = System.Diagnostics.Stopwatch.GetTimestamp();
         base.PrepareContainerForItemOverride(element, item);
+        DiagPrepareTicks += System.Diagnostics.Stopwatch.GetTimestamp() - diagT0;
 
 #if !WINDOWS
         // Post-rebind scroll restore rides the panel's own rebuild: prepares are the only

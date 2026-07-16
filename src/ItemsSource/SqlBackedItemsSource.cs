@@ -70,7 +70,7 @@ namespace WinUI.TableView;
 /// supplied <see cref="CancellationToken"/>.
 /// </para>
 /// </remarks>
-public sealed class SqlBackedItemsSource : ITableViewItemsSource
+public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
 {
     /// <summary>
     /// The row-shape data the host needs in order to build a SQL query.
@@ -666,6 +666,39 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource
     }
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    // ── non-generic IList ──────────────────────────────────────────
+    //
+    // Uno's ItemsControl.ItemFromIndex resolves items through
+    // EnumerableExtensions.ElementAt(IEnumerable, int), whose O(1) fast
+    // path requires non-generic IList (the IList<object> from
+    // ICollectionView is not checked). Without it every
+    // IndexFromContainer at flat index N enumerated N rows — O(offset)
+    // per realized row during scrolling (see VirtualTreeItemsSource).
+
+    bool IList.IsFixedSize => false;
+    bool IList.IsReadOnly => true;
+    bool ICollection.IsSynchronized => false;
+    object ICollection.SyncRoot => this;
+
+    // PeekAt, NOT the fetching indexer: this serves Uno's per-container identity
+    // checks (ItemFromIndex), which probe far more indices than the viewport —
+    // fetch-triggering reads here flood the page queue and starve the viewport's
+    // own fill (see VirtualTreeItemsSource).
+    object? IList.this[int index]
+    {
+        get => PeekAt(index);
+        set => throw new NotSupportedException("SqlBackedItemsSource is read-only.");
+    }
+
+    int IList.Add(object? item) => throw new NotSupportedException("SqlBackedItemsSource is read-only.");
+    void IList.Remove(object? item) => throw new NotSupportedException("SqlBackedItemsSource is read-only.");
+
+    void ICollection.CopyTo(Array array, int index)
+    {
+        for (var i = 0; i < _count && index + i < array.Length; i++)
+            array.SetValue(PeekAt(i), index + i);
+    }
 
     // ── ICollectionView (current item — degenerate) ─────────────────
 

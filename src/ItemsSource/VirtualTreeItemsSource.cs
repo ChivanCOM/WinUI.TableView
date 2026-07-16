@@ -31,7 +31,7 @@ namespace WinUI.TableView;
 /// on-demand leaf pages. Wraps <see cref="VirtualTreeModel"/> — construct
 /// the model, hand it here, assign to <see cref="TableView.ItemsSource"/>.
 /// </summary>
-public sealed class VirtualTreeItemsSource : ITableViewItemsSource
+public sealed class VirtualTreeItemsSource : ITableViewItemsSource, IList
 {
     private readonly VirtualTreeModel _model;
 
@@ -198,6 +198,42 @@ public sealed class VirtualTreeItemsSource : ITableViewItemsSource
     }
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    // ── non-generic IList ──────────────────────────────────────────
+    //
+    // Uno's ItemsControl.ItemFromIndex resolves items via
+    // EnumerableExtensions.ElementAt(IEnumerable, int), whose O(1) fast
+    // path needs non-generic IList — the generic IList<object> that
+    // ICollectionView brings is NOT checked. Without this, every
+    // IndexFromContainer at flat index N walked the enumerator through N
+    // rows of the model (creating placeholders along the way): fast
+    // scrolling cost O(offset) per realized row and froze the UI thread
+    // for ~0.5s per fling. The members below mirror the generic surface.
+
+    bool IList.IsFixedSize => false;
+    bool IList.IsReadOnly => true;
+    bool ICollection.IsSynchronized => false;
+    object ICollection.SyncRoot => this;
+
+    // PeekAt, NOT GetAt: this indexer serves Uno's per-container identity checks
+    // (ItemFromIndex), which probe far more indices than the viewport shows. A
+    // fetch-triggering read here floods the fetch queue (~20 junk pages per scroll
+    // hop) and starves the viewport's own fill. Fetches are driven by the generic
+    // indexer / explicit GetAt calls, exactly as before this fast path existed.
+    object? IList.this[int index]
+    {
+        get => _model.PeekAt(index);
+        set => throw new NotSupportedException("VirtualTreeItemsSource is read-only.");
+    }
+
+    int IList.Add(object? item) => throw new NotSupportedException("VirtualTreeItemsSource is read-only.");
+    void IList.Remove(object? item) => throw new NotSupportedException("VirtualTreeItemsSource is read-only.");
+
+    void ICollection.CopyTo(Array array, int index)
+    {
+        for (var i = 0; i < Count && index + i < array.Length; i++)
+            array.SetValue(_model.PeekAt(i), index + i);
+    }
 
     // ── ICollectionView (current item — degenerate) ─────────────────
 

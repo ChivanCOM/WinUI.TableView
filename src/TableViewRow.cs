@@ -56,6 +56,15 @@ public partial class TableViewRow : ListViewItem
         RegisterPropertyChangedCallback(BackgroundProperty, delegate { OnBackgroundChanged(); });
     }
 
+    /// <inheritdoc/>
+    protected override Windows.Foundation.Size MeasureOverride(Windows.Foundation.Size availableSize)
+    {
+        var diagT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var size = base.MeasureOverride(availableSize);
+        TableView.DiagRowMeasureTicks += System.Diagnostics.Stopwatch.GetTimestamp() - diagT0;
+        return size;
+    }
+
 #if !WINDOWS
     /// <inheritdoc/>
     protected override void OnRightTapped(RightTappedRoutedEventArgs e)

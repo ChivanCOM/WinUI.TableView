@@ -22,7 +22,7 @@ namespace WinUI.TableView;
 /// SQL-backed virtual list) without forking the control further. The
 /// behaviour of this class itself is unchanged.
 /// </remarks>
-internal partial class CollectionView : ICollectionView, ISupportIncrementalLoading, INotifyPropertyChanged, IComparer<object?>, ITableViewItemsSource
+internal partial class CollectionView : ICollectionView, ISupportIncrementalLoading, INotifyPropertyChanged, IComparer<object?>, ITableViewItemsSource, IList
 {
     private object[] _itemsCopy = []; // In case the source is ICollection, keep a copy of the items to keep track of removed items.
     private readonly List<object?> _view = [];
@@ -657,6 +657,39 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
     IEnumerator IEnumerable.GetEnumerator()
     {
         return _view.GetEnumerator();
+    }
+
+    // ── non-generic IList ──────────────────────────────────────────
+    //
+    // Uno's ItemsControl.ItemFromIndex resolves items through
+    // EnumerableExtensions.ElementAt(IEnumerable, int), whose O(1) fast
+    // path requires non-generic IList — the IList<object> that
+    // ICollectionView brings is not checked, so every per-container
+    // index/item lookup otherwise walks the enumerator from row 0
+    // (see VirtualTreeItemsSource for the measured impact).
+
+    bool IList.IsFixedSize => false;
+    bool ICollection.IsSynchronized => false;
+    object ICollection.SyncRoot => this;
+
+    object? IList.this[int index]
+    {
+        get => _view[index];
+        set => this[index] = value;
+    }
+
+    int IList.Add(object? item)
+    {
+        Add(item!);
+        return Count - 1;
+    }
+
+    void IList.Remove(object? item) => Remove(item);
+
+    void ICollection.CopyTo(Array array, int index)
+    {
+        for (var i = 0; i < _view.Count && index + i < array.Length; i++)
+            array.SetValue(_view[i], index + i);
     }
 
     /// <summary>

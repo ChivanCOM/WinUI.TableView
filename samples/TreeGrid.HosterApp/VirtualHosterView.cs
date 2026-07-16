@@ -396,6 +396,35 @@ public sealed partial class VirtualHosterView : Grid
     {
         var ok = true;
 
+        // --fling: the fast-scroll blank probe (viewport shows nothing during a fling).
+        if (Environment.GetCommandLineArgs().Contains("--fling"))
+        {
+            await FlingProbeAsync();
+            return;
+        }
+
+        // --fling-loop: hop between two far-apart high offsets forever — a stable hot loop
+        // for attaching a CPU profiler to the large-scroll path.
+        if (Environment.GetCommandLineArgs().Contains("--fling-loop"))
+        {
+            BuildSkeletonAndModel();
+            await SettleAsync();
+            _scrollViewer ??= FindScrollViewer(_table);
+            if (_scrollViewer is { } svLoop)
+            {
+                var extentLoop = Math.Max(0, svLoop.ExtentHeight - svLoop.ViewportHeight);
+                var flip = false;
+                Console.WriteLine("[hoster:fling] loop mode — profiler attach window");
+                while (true)
+                {
+                    svLoop.ChangeView(null, flip ? extentLoop * 0.95 : extentLoop * 0.60, null, true);
+                    flip = !flip;
+                    await Task.Delay(30);
+                }
+            }
+            return;
+        }
+
         // --repro: only the currently-failing scenario, for fast fix iteration.
         if (Environment.GetCommandLineArgs().Contains("--repro"))
         {
@@ -482,6 +511,102 @@ public sealed partial class VirtualHosterView : Grid
         _source.Refresh();
         ok &= await VerifyAsync("refresh (drop pages)");
 
+        Finish(ok);
+    }
+
+    /// <summary>Probes the fast-scroll blank symptom: hops across the full extent in
+    /// viewport-sized jumps (each one trips the layouter's large-scroll path, like a
+    /// trackpad fling) while sampling how many realized rows intersect the viewport.
+    /// Reports the longest zero-visible window and the worst UI-thread stall (a gap
+    /// between samples means layout/prep blocked the thread that long).</summary>
+    private async Task FlingProbeAsync()
+    {
+        // --fling-nolatency: zero store latency isolates the fill-burst backlog from
+        // container/layout cost (growth that persists at 0ms is NOT fetch-related).
+        if (Environment.GetCommandLineArgs().Contains("--fling-nolatency"))
+            _latencyMs = 0;
+        BuildSkeletonAndModel();
+        ScrollToOffset(0);
+        await SettleAsync();
+        _scrollViewer ??= FindScrollViewer(_table);
+        if (_scrollViewer is not { } sv)
+        {
+            Console.WriteLine("[hoster:fling] no ScrollViewer");
+            Finish(false);
+            return;
+        }
+
+        var extent = Math.Max(0, sv.ExtentHeight - sv.ViewportHeight);
+        var samples = new List<(long T, int Visible, int Holes, double Offset)>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        void Sample()
+        {
+            var visible = 0;
+            var holes = 0;
+            foreach (var r in RealizedRows())
+            {
+                var y = r.TransformToVisual(sv).TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+                if (y > -r.ActualHeight && y < sv.ViewportHeight)
+                {
+                    visible++;
+                    if ((r.DataContext as DemoNode)?.Name is null or "…" || (r.DataContext as DemoNode)!.Name.EndsWith(" …"))
+                        holes++;
+                }
+            }
+            samples.Add((sw.ElapsedMilliseconds, visible, holes, sv.VerticalOffset));
+        }
+
+        const int hops = 16;
+        for (var h = 1; h <= hops; h++)
+        {
+            var t0 = sw.ElapsedMilliseconds;
+            var prep0 = TableView.DiagPrepares;
+            var prepT0 = TableView.DiagPrepareTicks;
+            var meas0 = TableView.DiagRowMeasureTicks;
+            var reads0 = VirtualTreeModel.DiagReads;
+            var scans0 = VirtualTreeModel.DiagIndexOfScans;
+            sv.ChangeView(null, extent * h / (double)hops, null, true);
+            Sample();
+            await Task.Delay(16);
+            Sample();
+            var prepMs = (TableView.DiagPrepareTicks - prepT0) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            var measMs = (TableView.DiagRowMeasureTicks - meas0) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            var panelKids = _table.ItemsPanelRoot is { } panel ? panel.Children.Count : -1;
+            Console.WriteLine($"[hoster:fling] hop {h:00} wall={sw.ElapsedMilliseconds - t0}ms "
+                + $"prepares={TableView.DiagPrepares - prep0} prepMs={prepMs} rowMeasureMs={measMs} "
+                + $"reads={VirtualTreeModel.DiagReads - reads0} idxScans={VirtualTreeModel.DiagIndexOfScans - scans0} "
+                + $"rows={RealizedRows().Count} panelKids={panelKids}");
+        }
+        while (sw.ElapsedMilliseconds < 2500)
+        {
+            Sample();
+            await Task.Delay(30);
+        }
+
+        long blankStart = -1, worstBlank = 0, blankAt = 0, lastT = 0, worstGap = 0, gapAt = 0;
+        foreach (var s in samples)
+        {
+            if (s.T - lastT > worstGap) { worstGap = s.T - lastT; gapAt = lastT; }
+            lastT = s.T;
+            if (s.Visible == 0) { blankStart = blankStart < 0 ? s.T : blankStart; }
+            else if (blankStart >= 0)
+            {
+                if (s.T - blankStart > worstBlank) { worstBlank = s.T - blankStart; blankAt = blankStart; }
+                blankStart = -1;
+            }
+        }
+        if (blankStart >= 0 && lastT - blankStart > worstBlank) { worstBlank = lastT - blankStart; blankAt = blankStart; }
+
+        foreach (var s in samples)
+            if (s.Visible == 0 || s.Holes > 0)
+                Console.WriteLine($"[hoster:fling] t={s.T}ms visible={s.Visible} holes={s.Holes} offset={s.Offset:F0}");
+        Console.WriteLine($"[hoster:fling] extent={extent:F0} samples={samples.Count} worstBlank={worstBlank}ms@{blankAt}ms worstUiStall={worstGap}ms@{gapAt}ms");
+
+        var ok = worstBlank < 200;
+        Console.WriteLine(ok
+            ? "[hoster:fling] PASS — viewport never blank >200ms during fling"
+            : $"[hoster:fling] FAIL — viewport blank {worstBlank}ms during fling");
         Finish(ok);
     }
 

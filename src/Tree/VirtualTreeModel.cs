@@ -104,6 +104,12 @@ public sealed class VirtualTreeModel
     // duplicates resolve to the first occurrence. Buffers live only for touched-but-unfetched
     // pages and are dropped when the real page lands or on Clear.
     private readonly Dictionary<(object? Group, int Page), object?[]> _placeholderPages = new();
+
+    // Reverse map placeholder → its slot, so IndexOf resolves placeholder rows too.
+    // Required since the source exposes non-generic IList: Uno's container index
+    // repair calls IndexOf(item) on containers that are still showing placeholders,
+    // and a -1 there breaks the post-collapse re-anchor (panel rebuilds from row 0).
+    private readonly Dictionary<object, (object? Group, int Page, int Slot)> _placeholderIndex = new(ReferenceEqualityComparer.Instance);
     private readonly LinkedList<(object? Group, int Page)> _pageLru = new();
     private readonly Dictionary<(object? Group, int Page), LinkedListNode<(object? Group, int Page)>> _pageLruNodes = new();
     private readonly HashSet<(object? Group, int Page)> _pagesInFlight = new();
@@ -227,6 +233,7 @@ public sealed class VirtualTreeModel
         _subscribedLeaves.Clear();
         _pages.Clear();
         _placeholderPages.Clear();
+        _placeholderIndex.Clear();
         _pageLru.Clear();
         _pageLruNodes.Clear();
         _leafIndex.Clear();
@@ -325,7 +332,7 @@ public sealed class VirtualTreeModel
     /// group rows; for leaf rows the cached leaf, or the group's placeholder
     /// with a page fetch kicked off as a side effect.
     /// </summary>
-    public object? GetAt(int index) => At(index, fetchIfMissing: true);
+    public object? GetAt(int index) { DiagReads++; return At(index, fetchIfMissing: true); }
 
     /// <summary>
     /// Like <see cref="GetAt"/> but never triggers a fetch — for enumerator
@@ -433,12 +440,32 @@ public sealed class VirtualTreeModel
         if (!_placeholderPages.TryGetValue(key, out var buffer))
         {
             if (_placeholderPages.Count > _maxPagesCached * 2)
+            {
                 _placeholderPages.Clear();   // cheap bound; identities re-create on demand
+                _placeholderIndex.Clear();
+            }
             _placeholderPages[key] = buffer = new object?[_pageSize];
         }
-        return buffer[inPage] ??= _placeholderAtOf is { } withIndex
+        if (buffer[inPage] is { } cached)
+            return cached;
+        var created = _placeholderAtOf is { } withIndex
             ? withIndex(key.Group, key.Page * _pageSize + inPage)
             : _placeholderOf(key.Group);
+        buffer[inPage] = created;
+        _placeholderIndex[created] = (key.Group, key.Page, inPage);
+        return created;
+    }
+
+    /// <summary>Drops a slot's placeholder page AND its reverse-map entries — always use
+    /// this instead of removing from <see cref="_placeholderPages"/> directly, or
+    /// <see cref="IndexOf"/> keeps resolving placeholders that no longer occupy a slot.</summary>
+    private void DropPlaceholderPage((object? Group, int Page) key)
+    {
+        if (!_placeholderPages.Remove(key, out var buffer))
+            return;
+        foreach (var p in buffer)
+            if (p is not null)
+                _placeholderIndex.Remove(p);
     }
 
     private Segment FindSegment(int index)
@@ -459,6 +486,12 @@ public sealed class VirtualTreeModel
     /// segments; leaves only when their page is cached (deliberately no
     /// full-range walk — that would defeat virtualization).
     /// </summary>
+    /// <summary>Diagnostics for the hoster's fling probe: how often rows are read and how
+    /// often IndexOf misses the O(1) map (falling to the segment scan). Plain increments —
+    /// no cost worth gating.</summary>
+    public static int DiagReads;
+    public static int DiagIndexOfScans;
+
     public int IndexOf(object? item)
     {
         if (item is null)
@@ -476,6 +509,18 @@ public sealed class VirtualTreeModel
             return flat < seg.Start + seg.Length ? flat : -1;
         }
 
+        // Placeholders resolve exactly like cached leaves — they ARE the items
+        // realized containers show for unfetched rows, and identity consumers
+        // (container index repair, ContainerFromItem) probe them the same way.
+        if (_placeholderIndex.TryGetValue(item, out var ploc))
+        {
+            if (FindLeafSegment(ploc.Group) is not { } pseg)
+                return -1;
+            var flat = pseg.Start + ploc.Page * _pageSize + ploc.Slot;
+            return flat < pseg.Start + pseg.Length ? flat : -1;
+        }
+
+        DiagIndexOfScans++;
         foreach (var seg in _segments)
         {
             if (!seg.IsLeafBlock && ReferenceEquals(seg.Group, item))
@@ -546,7 +591,7 @@ public sealed class VirtualTreeModel
                 buffer[i] = rows[i];
 
             _pages[key] = buffer;
-            _placeholderPages.Remove(key);
+            DropPlaceholderPage(key);
             _pagesInFlight.Remove(key);
             _pageFailures.Remove(key);
             _pageCooldownUntil.Remove(key);
