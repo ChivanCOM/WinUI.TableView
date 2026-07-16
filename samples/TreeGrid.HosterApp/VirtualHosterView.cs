@@ -401,9 +401,18 @@ public sealed partial class VirtualHosterView : Grid
         {
             // The user's exact gesture first: scrolled a little, collapse the folder at the
             // top of the viewport.
+            // Offset ZERO first — the user's real position: no scroll at all, collapse an
+            // expanded folder a few rows down.
+            BuildSkeletonAndModel();
+            ScrollToOffset(0);
+            ok = await VerifyAsync("at top");
+            _roots[1].IsExpanded = false;
+            _table.RefreshAfterTreeToggle();
+            ok &= await VerifyAsync("collapse at offset zero");
+
             BuildSkeletonAndModel();
             ScrollToOffset(500);
-            ok = await VerifyAsync("scroll slightly");
+            ok &= await VerifyAsync("scroll slightly");
             var top = _model.PeekAt(FirstVisibleGroupIndex()) as DemoNode;
             if (top is { HasChildren: true })
             {

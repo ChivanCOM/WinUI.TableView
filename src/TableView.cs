@@ -1106,6 +1106,7 @@ public partial class TableView : ListView
     // structural in the burst (Reset / insert / remove), or a burst larger than the cap, still
     // forces the full re-point.
     private bool _unoBurstNeedsRebind;
+    private bool _unoShiftReseat;
     private readonly HashSet<int> _unoChangedIndices = new();
     private const int UnoInPlacePatchCap = 512;
 
@@ -1130,9 +1131,19 @@ public partial class TableView : ListView
                 _unoBurstNeedsRebind = true; // too many to patch cheaply — fall back to rebind
             }
         }
+        else if (e.CollectionChange is CollectionChange.ItemInserted or CollectionChange.ItemRemoved)
+        {
+            // Small structural deltas (expand/collapse under the model's bulk threshold) do NOT
+            // re-point the ItemsSource: rebuilding the whole panel to remove a handful of rows
+            // is what produced the blank band (the rebuild loses the scroll anchor). Instead
+            // every realized row from the change point on is re-seated in place — contents
+            // shift by the delta, unrealized rows read through on realization. The extent
+            // estimate lags by |delta| rows until the next Reset; invisible next to the band.
+            _unoShiftReseat = true;
+        }
         else
         {
-            _unoBurstNeedsRebind = true; // Reset / insert / remove: structural, must re-point
+            _unoBurstNeedsRebind = true; // Reset: structural beyond repair, re-point
         }
 
         if (_unoRefreshQueued)
@@ -1156,6 +1167,13 @@ public partial class TableView : ListView
             var changedIndices = new HashSet<int>(_unoChangedIndices);
             _unoChangedIndices.Clear();
             PatchRealizedRows(changedIndices);
+
+            if (_unoShiftReseat)
+            {
+                _unoShiftReseat = false;
+                ReseatPanelRows();
+                ItemsPanelRoot?.InvalidateMeasure();
+            }
 
             if (_unoReseatBurstsLeft > 0)
             {

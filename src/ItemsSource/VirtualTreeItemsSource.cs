@@ -53,8 +53,11 @@ public sealed class VirtualTreeItemsSource : ITableViewItemsSource
 
     // ── Model change translation ────────────────────────────────────
 
+    private static readonly bool Trace = Environment.GetEnvironmentVariable("TREEGRID_TRACE") == "1";
+
     private void OnModelReset()
     {
+        if (Trace) Console.WriteLine("[vtis] Reset");
         RaisePropertyChanged(nameof(Count));
         CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
         VectorChanged?.Invoke(this, new VectorChangedEventArgs(CollectionChange.Reset));
@@ -62,6 +65,7 @@ public sealed class VirtualTreeItemsSource : ITableViewItemsSource
 
     private void OnModelRangeInserted(int index, int count)
     {
+        if (Trace) Console.WriteLine($"[vtis] Insert {index}+{count}");
         RaisePropertyChanged(nameof(Count));
         for (var i = 0; i < count; i++)
         {
@@ -80,6 +84,7 @@ public sealed class VirtualTreeItemsSource : ITableViewItemsSource
 
     private void OnModelRangeRemoved(int index, int count)
     {
+        if (Trace) Console.WriteLine($"[vtis] Remove {index}+{count}");
         RaisePropertyChanged(nameof(Count));
         // Highest index first so each removal's index stays valid.
         for (var i = count - 1; i >= 0; i--)
