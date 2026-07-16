@@ -97,6 +97,12 @@ public sealed class VirtualTreeModel
     // Leaf page cache. Key is (group identity, page-within-group) so the
     // cache survives expand/collapse (group-local indices don't shift).
     private readonly Dictionary<(object? Group, int Page), object?[]> _pages = new();
+
+    // Per-slot placeholder identity: sharing ONE placeholder object across rows breaks every
+    // identity-based consumer (ListView container maps, IndexOf, overlap detection) because
+    // duplicates resolve to the first occurrence. Buffers live only for touched-but-unfetched
+    // pages and are dropped when the real page lands or on Clear.
+    private readonly Dictionary<(object? Group, int Page), object?[]> _placeholderPages = new();
     private readonly LinkedList<(object? Group, int Page)> _pageLru = new();
     private readonly Dictionary<(object? Group, int Page), LinkedListNode<(object? Group, int Page)>> _pageLruNodes = new();
     private readonly HashSet<(object? Group, int Page)> _pagesInFlight = new();
@@ -217,6 +223,7 @@ public sealed class VirtualTreeModel
             leaf.PropertyChanged -= OnLeafPropertyChanged;
         _subscribedLeaves.Clear();
         _pages.Clear();
+        _placeholderPages.Clear();
         _pageLru.Clear();
         _pageLruNodes.Clear();
         _leafIndex.Clear();
@@ -342,7 +349,7 @@ public sealed class VirtualTreeModel
         if (_pages.TryGetValue(key, out var buffer))
         {
             TouchLru(key);
-            return buffer[inPage] ?? _placeholderOf(seg.Group);
+            return buffer[inPage] ?? PlaceholderAt(key, inPage);
         }
 
         if (fetchIfMissing && !_pagesInFlight.Contains(key) && !InCooldown(key))
@@ -358,10 +365,21 @@ public sealed class VirtualTreeModel
             // awaited task was already finished) — return the real row now
             // instead of a placeholder the next read would swap anyway.
             if (_pages.TryGetValue(key, out var landed))
-                return landed[inPage] ?? _placeholderOf(seg.Group);
+                return landed[inPage] ?? PlaceholderAt(key, inPage);
         }
 
-        return _placeholderOf(seg.Group);
+        return PlaceholderAt(key, inPage);
+    }
+
+    private object PlaceholderAt((object? Group, int Page) key, int inPage)
+    {
+        if (!_placeholderPages.TryGetValue(key, out var buffer))
+        {
+            if (_placeholderPages.Count > _maxPagesCached * 2)
+                _placeholderPages.Clear();   // cheap bound; identities re-create on demand
+            _placeholderPages[key] = buffer = new object?[_pageSize];
+        }
+        return buffer[inPage] ??= _placeholderOf(key.Group);
     }
 
     private Segment FindSegment(int index)
@@ -469,6 +487,7 @@ public sealed class VirtualTreeModel
                 buffer[i] = rows[i];
 
             _pages[key] = buffer;
+            _placeholderPages.Remove(key);
             _pagesInFlight.Remove(key);
             _pageFailures.Remove(key);
             _pageCooldownUntil.Remove(key);

@@ -166,16 +166,7 @@ public sealed partial class VirtualHosterView : Grid
         Environment.GetEnvironmentVariable("PLACEHOLDER_MODE") == "unique";
 
     private object PlaceholderFor(object? group)
-    {
-        var depth = group is DemoNode g ? g.Depth + 1 : 0;
-        if (UniquePlaceholders)
-            return new DemoNode("…", depth);
-        if (group is null)
-            return new DemoNode("…", 0);
-        if (!_placeholders.TryGetValue(group, out var p))
-            _placeholders[group] = p = new DemoNode("…", depth);
-        return p;
-    }
+        => new DemoNode("…", group is DemoNode g ? g.Depth + 1 : 0);   // model caches per slot
 
     private void ExpandAll()
     {
@@ -408,9 +399,22 @@ public sealed partial class VirtualHosterView : Grid
         // --repro: only the currently-failing scenario, for fast fix iteration.
         if (Environment.GetCommandLineArgs().Contains("--repro"))
         {
+            // The user's exact gesture first: scrolled a little, collapse the folder at the
+            // top of the viewport.
+            BuildSkeletonAndModel();
+            ScrollToOffset(500);
+            ok = await VerifyAsync("scroll slightly");
+            var top = _model.PeekAt(FirstVisibleGroupIndex()) as DemoNode;
+            if (top is { HasChildren: true })
+            {
+                top.IsExpanded = false;
+                _table.RefreshAfterTreeToggle();
+                ok &= await VerifyAsync("top collapse at small offset");
+            }
+
             BuildSkeletonAndModel();
             ScrollToOffset(TotalRows() * RowHeight / 2);
-            ok = await VerifyAsync("scroll to middle");
+            ok &= await VerifyAsync("scroll to middle");
             _roots[2].IsExpanded = false;
             _table.RefreshAfterTreeToggle();
             ok &= await VerifyAsync("collapse above viewport");

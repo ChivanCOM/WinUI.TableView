@@ -167,24 +167,11 @@ public partial class TableView : ListView
         base.PrepareContainerForItemOverride(element, item);
 
 #if !WINDOWS
-        // Re-anchor scheduling rides the panel's own rebuild: every prepare during the
-        // post-rebind container storm defers the nudge; quiescence means the rebuild is done
-        // and the nudge finally sticks (see RebindBaseItemsSource).
-        if (_unoReanchorPending)
+        // Post-rebind scroll restore rides the panel's own rebuild: prepares are the only
+        // signal that provably fires in that window (see TryUnoReanchorRestore).
+        if (_unoReanchorPending && ++_unoReanchorPrepares % 8 == 0)
         {
-            // Synchronous on purpose: dispatcher-scheduled work around the rebind window
-            // (chains, timers, delays) dies silently, but prepares provably run. A single
-            // early attempt lands on a half-built extent, so retry on a prepare ladder and
-            // stop once the offset verifiably sits at the anchor.
-            var n = ++_unoReanchorPrepares;
-            if (n == 8 || n == 32 || n == 128)
-            {
-                if (RestoreAnchorViaLayouter() || n == 128)
-                {
-                    _unoReanchorPending = false;
-                    _unoReanchorCandidates.Clear();
-                }
-            }
+            TryUnoReanchorRestore();
         }
 #endif
 
@@ -1200,61 +1187,132 @@ public partial class TableView : ListView
         {
             _unoReanchorPending = true;
             _unoReanchorPrepares = 0;
-            _unoReanchorSawPrepare = false;
-            // Fallback only: if the rebuild never prepares a container, still nudge eventually.
-            ChainUnoReanchorPass(++_unoReanchorStamp, passesLeft: 150);
         }
     }
 
     private bool _unoReanchorPending;
     private int _unoReanchorPrepares;
-    private bool _unoReanchorSawPrepare;
-    private int _unoReanchorStamp;
 
-    /// <summary>Defers the re-anchor until the panel's container-prepare storm has been quiet
-    /// for a stretch of dispatcher passes — that is when the post-rebind rebuild is actually
-    /// done and a view change finally sticks. Driven by chained TryEnqueue passes: timers and
-    /// awaited delays created inside the rebind window provably stop firing.</summary>
-    private void ScheduleUnoReanchorCheck()
-    {
-        // Called per container prepare: the first one marks the rebuild as underway; each
-        // one restarts the quiescence countdown.
-        _unoReanchorSawPrepare = true;
-        var stamp = ++_unoReanchorStamp;
-        ChainUnoReanchorPass(stamp, passesLeft: 12);
-    }
-
-    private void ChainUnoReanchorPass(int stamp, int passesLeft)
-    {
-        DispatcherQueue?.TryEnqueue(() =>
-        {
-            if (!_unoReanchorPending || stamp != _unoReanchorStamp)
-            {
-                return;   // a newer prepare re-scheduled the check, or nothing pending
-            }
-
-            if (passesLeft > 0)
-            {
-                ChainUnoReanchorPass(stamp, passesLeft - 1);
-                return;
-            }
-
-            _unoReanchorPending = false;
-            if (_scrollViewer is not { } sv)
-            {
-                return;
-            }
-
-            RestoreAnchorViaLayouter();
-        });
-    }
-
+    /// <summary>Restores the scroll position after a rebind, driven by container prepares —
+    /// the only post-rebind signal that provably fires. The rebind momentarily shrinks the
+    /// extent, so the ScrollViewer CLAMPS the offset (deep positions land near 0): the position
+    /// is genuinely lost, not stale. A plain ChangeView back to the anchor-derived target trips
+    /// the layouter's own large-scroll recovery (ClearLines + reseed + rebuild), which
+    /// re-materializes correctly; retried every few prepares until the offset verifiably sits
+    /// at the target (the extent may still be growing, re-clamping early attempts).</summary>
     private readonly List<object> _unoReanchorCandidates = new();
 
-    /// <summary>Re-anchors the rebuilt panel through the layouter's own
-    /// ScrollIntoViewCore(index) — the internal entry that sets the offset and
-    /// re-materializes in one pass (the public ScrollIntoView walks every
-    /// intermediate container; bare offset nudges get wiped by the rebuild).</summary>
+    private void TryUnoReanchorRestore()
+    {
+        if (_scrollViewer is not { } sv)
+        {
+            _unoReanchorPending = false;
+            return;
+        }
+
+        var anchorIndex = -1;
+        foreach (var item in _unoReanchorCandidates)
+        {
+            anchorIndex = Items.IndexOf(item);
+            if (anchorIndex >= 0) break;
+        }
+
+        var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
+        var target = anchorIndex >= 0
+            ? anchorIndex * pitch
+            : _unoReanchorOffset;
+        target = Math.Min(target, Math.Max(0, sv.ScrollableHeight));
+
+        if (ReanchorTrace)
+                Console.WriteLine($"[reanchor] restore n={_unoReanchorPrepares} anchorIndex={anchorIndex} target={target:F0} offset={sv.VerticalOffset:F0} scrollable={sv.ScrollableHeight:F0}");
+
+        if (Math.Abs(sv.VerticalOffset - target) <= 2 || _unoReanchorPrepares > 400)
+        {
+            _unoReanchorPending = false;
+            _unoReanchorCandidates.Clear();
+
+            // The large-scroll recovery recycles containers WITHOUT re-preparing them, so a
+            // container can sit at the right position still showing the placeholder it held
+            // before the rebind — and no ItemChanged will ever fix it (the page is already
+            // cached, the swap event fired long ago). Re-seat every mismatched realized row.
+            foreach (var row in _rows)
+            {
+                var index = row.Index;
+                if (index < 0 || index >= Items.Count)
+                {
+                    continue;
+                }
+                var item = Items[index];
+                if (item is not null && !ReferenceEquals(row.Content, item))
+                {
+                    row.DataContext = item;
+                    row.Content = item;
+                }
+            }
+            return;
+        }
+
+        sv.ChangeView(null, target, null, disableAnimation: true);
+    }
+
+    private bool HasOverlappingRealizedRows()
+    {
+        var seen = new List<(int Index, double Y)>();
+        foreach (var row in _rows)
+        {
+            var index = row.Index;
+            if (row.ActualHeight <= 0 || index < 0 || index >= Items.Count)
+            {
+                continue;
+            }
+            try
+            {
+                var y = row.TransformToVisual(this).TransformPoint(new Point(0, 0)).Y;
+                foreach (var other in seen)
+                {
+                    if ((index > other.Index && y < other.Y - 1) || (index < other.Index && y > other.Y + 1))
+                    {
+                        return true;
+                    }
+                }
+                seen.Add((index, y));
+            }
+            catch (ArgumentException) { }
+        }
+        return false;
+    }
+
+    private void InvokeLayouterMethod(string name)
+    {
+        try
+        {
+            var layouter = GetLayouterViaReflection();
+            layouter?.GetType().GetMethod(name,
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
+                ?.Invoke(layouter, null);
+            if (ReanchorTrace)
+                Console.WriteLine($"[reanchor] layouter {name} invoked");
+        }
+        catch (Exception ex)
+        {
+            if (ReanchorTrace)
+                Console.WriteLine($"[reanchor] layouter {name} failed: {ex.Message}");
+        }
+    }
+
+    private object? GetLayouterViaReflection()
+    {
+        if (ItemsPanelRoot is not { } panel)
+        {
+            return null;
+        }
+        var get = panel.GetType().GetMethod("Microsoft.UI.Xaml.Controls.IVirtualizingPanel.GetLayouter",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? panel.GetType().GetMethod("GetLayouter",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+        return get?.Invoke(panel, null);
+    }
+
     private bool RestoreAnchorViaLayouter()
     {
         var anchorIndex = -1;
@@ -1266,15 +1324,7 @@ public partial class TableView : ListView
 
         try
         {
-            object? layouter = null;
-            if (ItemsPanelRoot is { } panel)
-            {
-                var get = panel.GetType().GetMethod("Microsoft.UI.Xaml.Controls.IVirtualizingPanel.GetLayouter",
-                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-                    ?? panel.GetType().GetMethod("GetLayouter",
-                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                layouter = get?.Invoke(panel, null);
-            }
+            var layouter = GetLayouterViaReflection();
 
             var core = layouter?.GetType().GetMethod("ScrollIntoViewCore",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
@@ -1289,7 +1339,7 @@ public partial class TableView : ListView
                 // Anchored when the offset now sits within a viewport of where the anchor
                 // row belongs (pitch estimated from a live container).
                 var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
-                var ok = Math.Abs(svc.VerticalOffset - anchorIndex * pitch) < Math.Max(1, svc.ViewportHeight) * 2;
+                var ok = Math.Abs(svc.VerticalOffset - anchorIndex * pitch) < pitch * 4;
                 if (ReanchorTrace)
                     Console.WriteLine($"[reanchor] after core: offset={svc.VerticalOffset:F0} expected~{anchorIndex * pitch:F0} ok={ok}");
                 return ok;
