@@ -60,12 +60,40 @@ internal partial class TableViewLocalizedStrings
         {
             return defaultValue;
         }
-        else
-        {
-            throw new InvalidOperationException("Should not happen.");
-        }
+        // On some hosts (Uno WASM) the packaged .resw for this library isn't resolvable through
+        // ResourceLoader. A missing chrome string must never hard-crash layout — fall back to English.
+        return Fallback(name);
 #endif
     }
+
+    private static string Fallback(string name) => name switch
+    {
+        nameof(BlankFilterValue) => "(Blank)",
+        nameof(Cancel) => "Cancel",
+        nameof(ClearFilter) => "Clear Filter",
+        nameof(ClearSorting) => "Clear Sorting",
+        nameof(Copy) => "Copy",
+        nameof(CopyCommandDescription) => "Copy the selected rows to the clipboard",
+        nameof(Paste) => "Paste",
+        nameof(PasteCommandDescription) => "Paste from the clipboard",
+        nameof(CopyWithHeaders) => "Copy with Headers",
+        nameof(CopyWithHeadersCommandDescription) => "Copy the selected rows with headers to the clipboard",
+        nameof(DatePickerPlaceholder) => "Select date",
+        nameof(DeselectAll) => "Deselect All",
+        nameof(DeselectAllCommandDescription) => "Deselect all rows",
+        nameof(ExportAll) => "Export All",
+        nameof(ExportSelected) => "Export Selected",
+        nameof(Ok) => "OK",
+        nameof(SearchBoxPlaceholder) => "Search",
+        nameof(SelectAll) => "Select All",
+        nameof(SelectAllCommandDescription) => "Select all rows",
+        nameof(SelectAllParenthesized) => "(Select All)",
+        nameof(SortAscending) => "Sort Ascending",
+        nameof(SortDescending) => "Sort Descending",
+        nameof(TimePickerPlaceholder) => "Select time",
+        nameof(Filtered) => "Filtered",
+        _ => name,
+    };
 
     public static string BlankFilterValue { get; set; }
     public static string Cancel { get; set; }
