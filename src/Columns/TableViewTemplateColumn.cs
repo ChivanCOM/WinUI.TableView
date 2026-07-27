@@ -32,6 +32,9 @@ public partial class TableViewTemplateColumn : TableViewColumn
     {
         return new ContentControl
         {
+            // Content drives the DataContext inside the template; without it {Binding} in the CellTemplate
+            // resolves against null and every template binding silently yields nothing.
+            Content = dataItem,
             VerticalContentAlignment = VerticalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             ContentTemplate = CellTemplateSelector?.SelectTemplate(dataItem) ?? CellTemplate
@@ -51,6 +54,7 @@ public partial class TableViewTemplateColumn : TableViewColumn
         {
             return new ContentControl
             {
+                Content = dataItem, // DataContext for the editing template (see GenerateElement)
                 VerticalContentAlignment = VerticalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 ContentTemplate = EditingTemplateSelector?.SelectTemplate(dataItem) ?? EditingTemplate

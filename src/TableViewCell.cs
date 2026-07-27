@@ -132,7 +132,7 @@ public partial class TableViewCell : ContentControl
                     return base.MeasureOverride(availableSize);
             }
 
-            #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860           
+            #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
             element.MaxWidth = double.PositiveInfinity;
             element.MaxHeight = double.PositiveInfinity;
             #endregion
@@ -681,7 +681,18 @@ public partial class TableViewCell : ContentControl
         }
 #endif
 
-        DispatcherQueue.TryEnqueue(InvalidateMeasure);
+        // Deferring the measure to a dispatcher tick leaves the freshly-generated element zero-sized for a
+        // frame, which on Uno WASM shows as a blank cell that fills a beat later during a fast scroll. When the
+        // TableView has a fixed RowHeight the layout is trivial and uniform, so measure now and render in place.
+        // Variable-height grids (e.g. the tree grid) keep the deferred path to avoid re-entrant measure churn.
+        if (TableView is { } tableView && !double.IsNaN(tableView.RowHeight))
+        {
+            InvalidateMeasure();
+        }
+        else
+        {
+            DispatcherQueue.TryEnqueue(InvalidateMeasure);
+        }
     }
 
     /// <summary>

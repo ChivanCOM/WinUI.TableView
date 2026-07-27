@@ -45,6 +45,15 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
     /// <summary>Font used for the icon glyph (e.g. a Font Awesome family).</summary>
     public FontFamily? GlyphFontFamily { get; set; }
 
+    /// <summary>Optional bool binding; while it reads true the glyph is hidden and
+    /// <see cref="GlyphOverrideTemplate"/> is shown in its place (e.g. a now-playing
+    /// equaliser on the current row).</summary>
+    public Binding? GlyphOverrideBinding { get; set; }
+
+    /// <summary>Content shown in the glyph's slot while <see cref="GlyphOverrideBinding"/>
+    /// is true. Its DataContext is the row item, so it can bind the row's own state.</summary>
+    public DataTemplate? GlyphOverrideTemplate { get; set; }
+
     /// <inheritdoc/>
     public override FrameworkElement GenerateElement(TableViewCell cell, object? dataItem)
     {
@@ -124,7 +133,40 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             glyph.SetBinding(TextBlock.TextProperty, GlyphBinding);
             if (GlyphForegroundBinding is not null)
                 glyph.SetBinding(TextBlock.ForegroundProperty, GlyphForegroundBinding);
-            panel.Children.Add(glyph);
+
+            if (GlyphOverrideBinding is not null && GlyphOverrideTemplate is not null)
+            {
+                // The two share one slot: the flag hides the glyph and shows the override
+                // (and vice-versa), so the current row can trade its icon for an animation.
+                var slot = new Grid { VerticalAlignment = VerticalAlignment.Center };
+
+                glyph.SetBinding(UIElement.VisibilityProperty, new Binding
+                {
+                    Path = GlyphOverrideBinding.Path,
+                    Converter = OverrideVisibilityConverter.WhenFalse,
+                });
+
+                var over = new ContentControl
+                {
+                    ContentTemplate = GlyphOverrideTemplate,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    IsTabStop = false,
+                };
+                over.SetBinding(ContentControl.ContentProperty, new Binding()); // the row item
+                over.SetBinding(UIElement.VisibilityProperty, new Binding
+                {
+                    Path = GlyphOverrideBinding.Path,
+                    Converter = OverrideVisibilityConverter.WhenTrue,
+                });
+
+                slot.Children.Add(glyph);
+                slot.Children.Add(over);
+                panel.Children.Add(slot);
+            }
+            else
+            {
+                panel.Children.Add(glyph);
+            }
         }
 
         var text = new TextBlock
@@ -173,6 +215,23 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
 
         public object Convert(object value, Type targetType, object parameter, string language)
             => value is true ? 1d : 0d;
+
+        public object ConvertBack(object value, Type targetType, object parameter, string language)
+            => throw new NotSupportedException();
+    }
+
+    /// <summary>bool → Visibility for the glyph-override slot. <see cref="WhenTrue"/> shows the
+    /// override on the true row; <see cref="WhenFalse"/> shows the glyph on every other.</summary>
+    private sealed partial class OverrideVisibilityConverter : IValueConverter
+    {
+        public static readonly OverrideVisibilityConverter WhenTrue = new(false);
+        public static readonly OverrideVisibilityConverter WhenFalse = new(true);
+
+        private readonly bool _invert;
+        private OverrideVisibilityConverter(bool invert) => _invert = invert;
+
+        public object Convert(object value, Type targetType, object parameter, string language)
+            => (value is true) != _invert ? Visibility.Visible : Visibility.Collapsed;
 
         public object ConvertBack(object value, Type targetType, object parameter, string language)
             => throw new NotSupportedException();
