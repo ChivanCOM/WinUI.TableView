@@ -249,6 +249,21 @@ public partial class TableViewCell : ContentControl
             return;
         }
 
+        // A right press opens a context menu. It is not a plain click and it is not the start of a
+        // drag selection, so none of what follows applies to it — and one part of it actively breaks
+        // the menu: OnSelectionDragStart clears the selection before a plain click, which on a
+        // right-click throws away the very rows the menu is about to act on. Right-clicking one of
+        // four selected albums left one selected and three not, and every command on the menu then
+        // acted on that one.
+        //
+        // Only cells do this, which is why right-clicking the gap between cells kept the selection:
+        // the row underneath has no such path. Nothing else here is wanted for a right press either —
+        // it must not capture the pointer, arm a drag, or move the selection anchor.
+        if (e.GetCurrentPoint(this).Properties.IsRightButtonPressed)
+        {
+            return;
+        }
+
         // e.KeyModifiers, never KeyboardHelper, on pointer paths: the tracked key state goes
         // stale when the app is switched away mid-modifier (alt/cmd-tab), turning every later
         // click into a shift-click. The pointer event carries the live OS state.
@@ -282,6 +297,15 @@ public partial class TableViewCell : ContentControl
     protected override void OnPointerReleased(PointerRoutedEventArgs e)
     {
         base.OnPointerReleased(e);
+
+        // The right button's press was left alone above, so its release is left alone too — including
+        // the Handled at the end, which would otherwise eat the event the right-tap gesture (and with
+        // it the context menu) is formed from.
+        if (e.GetCurrentPoint(this).Properties.PointerUpdateKind
+            is Microsoft.UI.Input.PointerUpdateKind.RightButtonReleased)
+        {
+            return;
+        }
 
         if (!e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Shift) && TableView is not null)
         {
