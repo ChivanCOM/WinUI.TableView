@@ -1306,8 +1306,10 @@ public partial class TableView : ListView
         }
 
         var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
+        // Mixed row heights (RowHeightSelector) make index × pitch wrong by the accumulated
+        // difference above the anchor — the host's offset function is exact where provided.
         var target = anchorIndex >= 0
-            ? anchorIndex * pitch
+            ? RowOffsetOfIndex?.Invoke(anchorIndex) ?? anchorIndex * pitch
             : _unoReanchorOffset;
         target = Math.Min(target, Math.Max(0, sv.ScrollableHeight));
 
@@ -1423,11 +1425,13 @@ public partial class TableView : ListView
                 core.Invoke(layouter, new object[] { anchorIndex, ScrollIntoViewAlignment.Leading });
 
                 // Anchored when the offset now sits within a viewport of where the anchor
-                // row belongs (pitch estimated from a live container).
+                // row belongs (pitch estimated from a live container; the host's offset
+                // function is exact under mixed row heights).
                 var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
-                var ok = Math.Abs(svc.VerticalOffset - anchorIndex * pitch) < pitch * 4;
+                var expected = RowOffsetOfIndex?.Invoke(anchorIndex) ?? anchorIndex * pitch;
+                var ok = Math.Abs(svc.VerticalOffset - expected) < pitch * 4;
                 if (ReanchorTrace)
-                    Console.WriteLine($"[reanchor] after core: offset={svc.VerticalOffset:F0} expected~{anchorIndex * pitch:F0} ok={ok}");
+                    Console.WriteLine($"[reanchor] after core: offset={svc.VerticalOffset:F0} expected~{expected:F0} ok={ok}");
                 return ok;
             }
         }

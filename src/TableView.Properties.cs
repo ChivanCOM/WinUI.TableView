@@ -495,6 +495,23 @@ public partial class TableView
     }
 
     /// <summary>
+    /// FOBO fork addition. Optional per-row height: item → the exact height for that item's row,
+    /// applied over <see cref="RowHeight"/> on every (re)bind. Lets a tree grid give its group rows
+    /// a taller line than its leaf rows while heights stay exact and virtualization-friendly.
+    /// Set <see cref="RowOffsetOfIndex"/> alongside it so the Uno scroll restore can compute a row's
+    /// true offset under mixed heights.
+    /// </summary>
+    public Func<object?, double>? RowHeightSelector { get; set; }
+
+    /// <summary>
+    /// FOBO fork addition. Exact top offset (in extent pixels) of the row at a flat index, supplied
+    /// by the host when row heights vary (<see cref="RowHeightSelector"/>). The Uno reanchor restore
+    /// otherwise estimates offsets as index × (one realized row's height), which is wrong the moment
+    /// two row heights exist.
+    /// </summary>
+    public Func<int, double>? RowOffsetOfIndex { get; set; }
+
+    /// <summary>
     /// Gets or sets the maximum height of the rows.
     /// </summary>
     public double RowMaxHeight

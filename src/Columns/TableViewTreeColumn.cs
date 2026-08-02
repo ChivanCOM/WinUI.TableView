@@ -54,6 +54,15 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
     /// is true. Its DataContext is the row item, so it can bind the row's own state.</summary>
     public DataTemplate? GlyphOverrideTemplate { get; set; }
 
+    /// <summary>Optional bool binding; while it reads true, <see cref="IconTemplate"/> is shown in
+    /// the glyph's slot (e.g. album art on a group row). Independent of the glyph override: the icon
+    /// overlays the same slot, so a row that shows it should bind its glyph to an empty string.</summary>
+    public Binding? IconVisibleBinding { get; set; }
+
+    /// <summary>Content shown in the glyph's slot while <see cref="IconVisibleBinding"/> is true.
+    /// Its DataContext is the row item, so it can bind the row's own state (a cover, a kind glyph).</summary>
+    public DataTemplate? IconTemplate { get; set; }
+
     /// <inheritdoc/>
     public override FrameworkElement GenerateElement(TableViewCell cell, object? dataItem)
     {
@@ -134,33 +143,62 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             if (GlyphForegroundBinding is not null)
                 glyph.SetBinding(TextBlock.ForegroundProperty, GlyphForegroundBinding);
 
-            if (GlyphOverrideBinding is not null && GlyphOverrideTemplate is not null)
+            var hasOverride = GlyphOverrideBinding is not null && GlyphOverrideTemplate is not null;
+            var hasIcon = IconVisibleBinding is not null && IconTemplate is not null;
+
+            if (hasOverride || hasIcon)
             {
-                // The two share one slot: the flag hides the glyph and shows the override
-                // (and vice-versa), so the current row can trade its icon for an animation.
+                // Everything shares one slot, overlaid in a Grid: the override flag hides the glyph
+                // and shows the override (a now-playing animation); the icon flag lays its template
+                // over the same spot (a group row's art) — those rows bind their glyph to an empty
+                // string, so the layers never fight.
                 var slot = new Grid { VerticalAlignment = VerticalAlignment.Center };
 
-                glyph.SetBinding(UIElement.VisibilityProperty, new Binding
+                if (hasOverride)
                 {
-                    Path = GlyphOverrideBinding.Path,
-                    Converter = OverrideVisibilityConverter.WhenFalse,
-                });
+                    glyph.SetBinding(UIElement.VisibilityProperty, new Binding
+                    {
+                        Path = GlyphOverrideBinding!.Path,
+                        Converter = OverrideVisibilityConverter.WhenFalse,
+                    });
 
-                var over = new ContentControl
+                    var over = new ContentControl
+                    {
+                        ContentTemplate = GlyphOverrideTemplate,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        IsTabStop = false,
+                    };
+                    over.SetBinding(ContentControl.ContentProperty, new Binding()); // the row item
+                    over.SetBinding(UIElement.VisibilityProperty, new Binding
+                    {
+                        Path = GlyphOverrideBinding.Path,
+                        Converter = OverrideVisibilityConverter.WhenTrue,
+                    });
+                    slot.Children.Add(glyph);
+                    slot.Children.Add(over);
+                }
+                else
                 {
-                    ContentTemplate = GlyphOverrideTemplate,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    IsTabStop = false,
-                };
-                over.SetBinding(ContentControl.ContentProperty, new Binding()); // the row item
-                over.SetBinding(UIElement.VisibilityProperty, new Binding
-                {
-                    Path = GlyphOverrideBinding.Path,
-                    Converter = OverrideVisibilityConverter.WhenTrue,
-                });
+                    slot.Children.Add(glyph);
+                }
 
-                slot.Children.Add(glyph);
-                slot.Children.Add(over);
+                if (hasIcon)
+                {
+                    var icon = new ContentControl
+                    {
+                        ContentTemplate = IconTemplate,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        IsTabStop = false,
+                    };
+                    icon.SetBinding(ContentControl.ContentProperty, new Binding()); // the row item
+                    icon.SetBinding(UIElement.VisibilityProperty, new Binding
+                    {
+                        Path = IconVisibleBinding!.Path,
+                        Converter = OverrideVisibilityConverter.WhenTrue,
+                    });
+                    slot.Children.Add(icon);
+                }
+
                 panel.Children.Add(slot);
             }
             else

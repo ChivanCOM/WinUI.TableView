@@ -801,6 +801,17 @@ public partial class TableViewCell : ContentControl
     /// <param name="item">The data item associated with the cell.</param>
     internal void EnsureStyle(object? item)
     {
+        // FOBO fork addition: the per-item row height rides the same per-rebind hook as the
+        // conditional styles. This is the one path that provably runs with the item in hand for
+        // both a freshly built cell (presenter AddCell) and a recycled one (container prepare's
+        // EnsureCellsStyle) — the row-level OnContentChanged fires before TableViewRow.TableView
+        // is even assigned (the prepare sets it a dispatcher tick later), so a stamp there sees
+        // no selector and the cell keeps the uniform RowHeight binding.
+        if (TableView?.RowHeightSelector is { } heights)
+        {
+            Height = heights(item);
+        }
+
         _cellStyles ??= [
             .. Column?.ConditionalCellStyles ?? [], // Column styles have first priority
             .. TableView?.ConditionalCellStyles ?? []]; // TableView styles have second priority

@@ -166,6 +166,47 @@ public class VirtualTreeModelTests
     }
 
     [Fact]
+    public void GroupRowsBefore_MatchesReference()
+    {
+        var h = new Harness();
+        h.Roots = new List<Group>
+        {
+            MakeGroup("A", 0, 3,
+                MakeGroup("A/X", 1, 2),
+                MakeGroup("A/Y", 1, 0)),
+            MakeGroup("B", 0, 5),
+        };
+        h.RootLeafCount = 2;
+        h.SetRoots();
+
+        // Reference: count "group:" entries in the materialized prefix, for every index incl. Count.
+        var flat = h.Reference();
+        for (var index = 0; index <= flat.Count; index++)
+        {
+            var expected = flat.Take(index).Count(r => r.StartsWith("group:"));
+            Assert.Equal(expected, h.Model.GroupRowsBefore(index));
+        }
+    }
+
+    [Fact]
+    public void GroupRowsBefore_TracksCollapse()
+    {
+        var h = new Harness();
+        var inner = MakeGroup("A/X", 1, 2);
+        h.Roots = new List<Group> { MakeGroup("A", 0, 3, inner), MakeGroup("B", 0, 1) };
+        h.SetRoots();
+
+        h.Roots[0].IsExpanded = false;   // A's subtree (A/X and all leaves) leaves the projection
+
+        var flat = h.Reference();
+        for (var index = 0; index <= flat.Count; index++)
+        {
+            var expected = flat.Take(index).Count(r => r.StartsWith("group:"));
+            Assert.Equal(expected, h.Model.GroupRowsBefore(index));
+        }
+    }
+
+    [Fact]
     public void UnfetchedIndex_ReturnsPlaceholder_ThenRealRowAfterFetch()
     {
         var h = new Harness();

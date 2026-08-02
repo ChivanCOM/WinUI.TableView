@@ -325,6 +325,25 @@ public sealed class VirtualTreeModel
         _count = cursor;
     }
 
+    /// <summary>
+    /// How many GROUP rows sit among the flat rows [0, <paramref name="index"/>). Lets a host with
+    /// two row heights (group vs leaf) compute a row's exact extent offset — group segments are
+    /// single rows and leaf blocks are all leaves, so one walk over the segments answers it without
+    /// touching a page. O(number of segments), which is O(visible groups).
+    /// </summary>
+    public int GroupRowsBefore(int index)
+    {
+        var groups = 0;
+        foreach (var seg in _segments)
+        {
+            if (seg.Start >= index)
+                break;
+            if (!seg.IsLeafBlock)
+                groups++;
+        }
+        return groups;
+    }
+
     // ── Row access ──────────────────────────────────────────────────
 
     /// <summary>
