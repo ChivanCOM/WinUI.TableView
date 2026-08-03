@@ -327,18 +327,22 @@ public sealed class VirtualTreeModel
 
     /// <summary>
     /// How many GROUP rows sit among the flat rows [0, <paramref name="index"/>). Lets a host with
-    /// two row heights (group vs leaf) compute a row's exact extent offset — group segments are
-    /// single rows and leaf blocks are all leaves, so one walk over the segments answers it without
-    /// touching a page. O(number of segments), which is O(visible groups).
+    /// more than one row height compute a row's exact extent offset — group segments are single rows
+    /// and leaf blocks are all leaves, so one walk over the segments answers it without touching a
+    /// page. O(number of segments), which is O(visible groups).
     /// </summary>
-    public int GroupRowsBefore(int index)
+    /// <param name="match">
+    /// Optional filter on the group itself, for a host whose groups are not all the same height (an
+    /// artist row taller than an album row). Null counts every group row.
+    /// </param>
+    public int GroupRowsBefore(int index, Func<object?, bool>? match = null)
     {
         var groups = 0;
         foreach (var seg in _segments)
         {
             if (seg.Start >= index)
                 break;
-            if (!seg.IsLeafBlock)
+            if (!seg.IsLeafBlock && (match is null || match(seg.Group)))
                 groups++;
         }
         return groups;

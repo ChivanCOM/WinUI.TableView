@@ -63,6 +63,16 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
     /// Its DataContext is the row item, so it can bind the row's own state (a cover, a kind glyph).</summary>
     public DataTemplate? IconTemplate { get; set; }
 
+    /// <summary>Optional per-row binding for the text's size (a double). A tree grid's levels are a
+    /// hierarchy, and size is how a reader is told which one they are looking at. Pair it with a
+    /// taller row (TableView.RowHeightSelector) so the bigger type gets the line it needs.</summary>
+    public Binding? FontSizeBinding { get; set; }
+
+    /// <summary>Optional per-row binding for the text's colour (a Brush). Named for the text so it is
+    /// not confused with <see cref="GlyphForegroundBinding"/>, which colours the icon beside it.</summary>
+    public Binding? TextForegroundBinding { get; set; }
+
+
     /// <inheritdoc/>
     public override FrameworkElement GenerateElement(TableViewCell cell, object? dataItem)
     {
@@ -213,6 +223,11 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
         text.SetBinding(TextBlock.TextProperty, Binding);
+        // All follow the (recycled) DataContext, like everything else in the cell.
+        if (FontSizeBinding is not null)
+            text.SetBinding(TextBlock.FontSizeProperty, FontSizeBinding);
+        if (TextForegroundBinding is not null)
+            text.SetBinding(TextBlock.ForegroundProperty, TextForegroundBinding);
         panel.Children.Add(text);
 
         return panel;

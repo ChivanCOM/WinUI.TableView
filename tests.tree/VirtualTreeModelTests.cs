@@ -189,6 +189,35 @@ public class VirtualTreeModelTests
     }
 
     [Fact]
+    public void GroupRowsBefore_Filtered_CountsOnlyMatchingGroups()
+    {
+        var h = new Harness();
+        h.Roots = new List<Group>
+        {
+            MakeGroup("A", 0, 3,
+                MakeGroup("A/X", 1, 2),
+                MakeGroup("A/Y", 1, 0)),
+            MakeGroup("B", 0, 5),
+        };
+        h.RootLeafCount = 2;
+        h.SetRoots();
+
+        // A host whose group rows are not all one height counts each kind for itself. Here the two
+        // levels stand in for an artist row and an album row.
+        var flat = h.Reference();
+        for (var index = 0; index <= flat.Count; index++)
+        {
+            var tops = h.Model.GroupRowsBefore(index, g => g is Group { Depth: 0 });
+            var nested = h.Model.GroupRowsBefore(index, g => g is Group { Depth: > 0 });
+
+            Assert.Equal(flat.Take(index).Count(r => r is "group:A" or "group:B"), tops);
+            Assert.Equal(flat.Take(index).Count(r => r is "group:A/X" or "group:A/Y"), nested);
+            // The kinds partition the groups: filtered counts sum to the unfiltered one.
+            Assert.Equal(h.Model.GroupRowsBefore(index), tops + nested);
+        }
+    }
+
+    [Fact]
     public void GroupRowsBefore_TracksCollapse()
     {
         var h = new Harness();
