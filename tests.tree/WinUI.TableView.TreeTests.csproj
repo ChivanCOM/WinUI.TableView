@@ -18,6 +18,10 @@
     <Compile Include="..\src\Tree\BulkObservableCollection.cs" />
     <Compile Include="..\src\Tree\TreeGridFlattener.cs" />
     <Compile Include="..\src\Tree\VirtualTreeModel.cs" />
+    <!-- Pure .NET too: expression-tree property access, no WinUI types. It is what the SQL-backed
+         (virtualized) sources read every cell through, so its per-type getter cache belongs here. -->
+    <Compile Include="..\src\Extensions\ObjectExtensions.cs" />
+    <Compile Include="..\src\Extensions\TypeExtensions.cs" />
   </ItemGroup>
 
   <ItemGroup>

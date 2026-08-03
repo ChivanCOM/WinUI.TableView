@@ -10,7 +10,10 @@ namespace WinUI.TableView;
 /// </summary>
 public class SortDescription
 {
-    private Func<object, object?>? _compiledValueGetter;
+    // FOBO fork: keyed by the item's runtime TYPE. A compiled getter casts to the exact type it was
+    // built from, and a virtualized source mixes real rows with a placeholder sentinel — see
+    // ObjectExtensions.ValueGetters.
+    private readonly Extensions.ObjectExtensions.ValueGetters _valueGetters = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SortDescription"/> class that describes
@@ -41,12 +44,11 @@ public class SortDescription
         if (item == null) return null;
         
         if (ValueDelegate is not null) return ValueDelegate(item);
-        
-        if (_compiledValueGetter is null && !string.IsNullOrWhiteSpace(PropertyName))
-            _compiledValueGetter = item.GetCompiledValueGetter(PropertyName!);
-            
-        return _compiledValueGetter?.Invoke(item);
-}
+
+        if (string.IsNullOrWhiteSpace(PropertyName)) return null;
+
+        return _valueGetters.For(item, PropertyName!)?.Invoke(item);
+    }
 
     /// <summary>
     /// Compares two objects based on the sort description.

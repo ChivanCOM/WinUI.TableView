@@ -20,6 +20,36 @@ internal static partial class ObjectExtensions
     private static partial Regex BindingPathRegex();
 
     /// <summary>
+    /// FOBO fork addition. Compiled getters for one binding path, kept PER RUNTIME TYPE.
+    ///
+    /// <para>A compiled getter casts its <c>object</c> parameter to the exact type of the item it was
+    /// built from, so handing it an item of any other type throws <see cref="InvalidCastException"/>.
+    /// A single cached getter is therefore only correct while every row is the same type — which a
+    /// virtualized source breaks by design: <see cref="SqlBackedItemsSource"/> hands out a placeholder
+    /// sentinel for rows whose page has not landed yet, and the first one to reach a getter compiled
+    /// against the real row type brought the app down.</para>
+    ///
+    /// <para>One entry per type rather than one entry re-compiled on mismatch: a scrolling grid
+    /// alternates between the row and the placeholder constantly, and a single slot would recompile an
+    /// expression tree on nearly every cell.</para>
+    /// </summary>
+    internal sealed class ValueGetters
+    {
+        private readonly Dictionary<Type, Func<object, object?>?> _byType = [];
+
+        /// <summary>The getter for this item's type, compiled on first sight of that type. Null when
+        /// the path does not resolve against it — a placeholder has none of the row's properties, and
+        /// the caller simply gets no content for that cell.</summary>
+        public Func<object, object?>? For(object dataItem, string bindingPath)
+        {
+            var type = dataItem.GetType();
+            if (!_byType.TryGetValue(type, out var getter))
+                _byType[type] = getter = dataItem.GetCompiledValueGetter(bindingPath);
+            return getter;
+        }
+    }
+
+    /// <summary>
     /// Creates and returns a compiled lambda expression for accessing the binding path on instances, with runtime type checking and casting support.
     /// </summary>
     /// <param name="dataItem">The data item instance to use for runtime type evaluation.</param>
@@ -517,19 +547,28 @@ internal static partial class ObjectExtensions
                 ? BuildIndexerGetterExpression(current, part)
                 : BuildPropertyGetterExpression(current, part);
 
-            if (nextSegmentAccess.Type.IsValueType && !nextSegmentAccess.Type.IsNullableType())
+            // FOBO fork: the null check is decided by whether the CONTAINER can be null, not by what
+            // reading it returns. Keyed on the result, a value-typed leaf skipped the check entirely —
+            // so "Inner.Number" on a row whose Inner is null threw a NullReferenceException out of the
+            // compiled lambda rather than reading as nothing. A non-nullable leaf is lifted to its
+            // nullable form so the null branch has something to be.
+            if (current.Type.IsValueType && !current.Type.IsNullableType())
             {
-                // Value types cannot be null, so don't need to check for null, and we can directly assign the access to the next segment
+                // The container cannot be null, so nothing needs guarding.
                 current = nextSegmentAccess;
             }
             else
             {
-                // Add null check: if current is null, stop and return null; otherwise, continue with the next access
-                var notNullCheck = Expression.NotEqual(current, Expression.Constant(null));
+                var resultType = nextSegmentAccess.Type.IsValueType && !nextSegmentAccess.Type.IsNullableType()
+                    ? typeof(Nullable<>).MakeGenericType(nextSegmentAccess.Type)
+                    : nextSegmentAccess.Type;
+
                 current = Expression.Condition(
-                    notNullCheck,
-                    nextSegmentAccess,
-                    Expression.Constant(null, nextSegmentAccess.Type)
+                    Expression.NotEqual(current, Expression.Constant(null, current.Type)),
+                    resultType == nextSegmentAccess.Type
+                        ? nextSegmentAccess
+                        : Expression.Convert(nextSegmentAccess, resultType),
+                    Expression.Constant(null, resultType)
                 );
             }
 

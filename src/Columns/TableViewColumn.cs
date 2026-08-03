@@ -15,8 +15,11 @@ namespace WinUI.TableView;
 [StyleTypedProperty(Property = nameof(CellStyle), StyleTargetType = typeof(TableViewCell))]
 public abstract partial class TableViewColumn : DependencyObject
 {
-    private Func<object, object?>? _compliedValueGetter;
-    private Func<object, object?>? _compliedClipboardValueGetter;
+    // FOBO fork: keyed by the item's runtime TYPE, not one getter for the whole column. A compiled
+    // getter casts to the exact type it was built from, and a virtualized source hands out a
+    // placeholder sentinel alongside real rows — see ObjectExtensions.ValueGetters.
+    private readonly ObjectExtensions.ValueGetters _valueGetters = new();
+    private readonly ObjectExtensions.ValueGetters _clipboardValueGetters = new();
     private Action<object, object?>? _compliedClipboardValueSetter;
 
     /// <summary>
@@ -108,11 +111,11 @@ public abstract partial class TableViewColumn : DependencyObject
         if (dataItem is null)
             return null;
 
-        if (_compliedValueGetter is null && !string.IsNullOrWhiteSpace(OperationContentBindingPropertyPath))
-            _compliedValueGetter = dataItem.GetCompiledValueGetter(OperationContentBindingPropertyPath!);
-
-        if (_compliedValueGetter is not null)
-            dataItem = _compliedValueGetter(dataItem);
+        if (!string.IsNullOrWhiteSpace(OperationContentBindingPropertyPath)
+            && _valueGetters.For(dataItem, OperationContentBindingPropertyPath!) is { } getValue)
+        {
+            dataItem = getValue(dataItem);
+        }
 
         if (OperationContentBinding?.Converter is not null)
         {
@@ -136,11 +139,11 @@ public abstract partial class TableViewColumn : DependencyObject
         if (dataItem is null)
             return null;
 
-        if (_compliedClipboardValueGetter is null && !string.IsNullOrWhiteSpace(ClipboardContentBindingPropertyPath))
-            _compliedClipboardValueGetter = dataItem.GetCompiledValueGetter(ClipboardContentBindingPropertyPath!);
-
-        if (_compliedClipboardValueGetter is not null)
-            dataItem = _compliedClipboardValueGetter(dataItem);
+        if (!string.IsNullOrWhiteSpace(ClipboardContentBindingPropertyPath)
+            && _clipboardValueGetters.For(dataItem, ClipboardContentBindingPropertyPath!) is { } getValue)
+        {
+            dataItem = getValue(dataItem);
+        }
 
         if (ClipboardContentBinding?.Converter is not null)
         {
