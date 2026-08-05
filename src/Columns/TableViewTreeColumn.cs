@@ -42,6 +42,11 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
     /// <summary>Binding for the optional icon foreground (Brush).</summary>
     public Binding? GlyphForegroundBinding { get; set; }
 
+    /// <summary>Binding for what the glyph MEANS, shown as a tooltip on it (string). A mark that
+    /// stands for a state is half a message until it can say which state, and the glyph is the only
+    /// part of the cell that knows.</summary>
+    public Binding? GlyphToolTipBinding { get; set; }
+
     /// <summary>Font used for the icon glyph (e.g. a Font Awesome family).</summary>
     public FontFamily? GlyphFontFamily { get; set; }
 
@@ -152,6 +157,8 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             glyph.SetBinding(TextBlock.TextProperty, GlyphBinding);
             if (GlyphForegroundBinding is not null)
                 glyph.SetBinding(TextBlock.ForegroundProperty, GlyphForegroundBinding);
+            if (GlyphToolTipBinding is not null)
+                glyph.SetBinding(ToolTipService.ToolTipProperty, GlyphToolTipBinding);
 
             var hasOverride = GlyphOverrideBinding is not null && GlyphOverrideTemplate is not null;
             var hasIcon = IconVisibleBinding is not null && IconTemplate is not null;

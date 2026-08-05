@@ -1210,6 +1210,7 @@ public partial class TableView : ListView
     private void RebindBaseItemsSource()
     {
         _unoReanchorOffset = _scrollViewer?.VerticalOffset ?? 0;
+        _unoReanchorCountBefore = Items?.Count ?? 0;
 
         // Capture the visible rows' items (top-down) BEFORE the re-point: whichever of them
         // still resolves to an index afterwards anchors the viewport again. Skip contents
@@ -1250,6 +1251,32 @@ public partial class TableView : ListView
     private bool _unoReanchorPending;
     private int _unoReanchorPrepares;
 
+    /// <summary>How many rows there were before the re-point. A rebind that changed the row count
+    /// wholesale did not move the reader's place — it destroyed it.</summary>
+    private int _unoReanchorCountBefore;
+
+    /// <summary>
+    /// Whether a row-derived anchor is worth aiming at.
+    ///
+    /// <para>Re-anchoring restores a POSITION. That is meaningful when the list is substantially the
+    /// same list — an edit, a re-sort, a page landing — and meaningless when it is not: delete ten
+    /// thousand of twenty thousand rows and the row somebody was looking at is either gone or has
+    /// moved half the list, so aiming at it means a long scroll to somewhere they never asked to be.
+    /// Worse, the restore loop retries until the offset lands within a couple of pixels of the
+    /// target, so an unreachable one costs hundreds of layout passes — which is a hang.</para>
+    ///
+    /// <para>Below the threshold the old offset is restored instead, clamped by the ScrollViewer,
+    /// which is both instant and the honest answer to "that place no longer exists".</para>
+    /// </summary>
+    private bool AnchorRowIsMeaningful()
+    {
+        var before = _unoReanchorCountBefore;
+        var now = Items?.Count ?? 0;
+        if (before == 0)
+            return false;
+        return Math.Abs(now - before) * 10 <= before;   // within 10% of the list it was
+    }
+
     /// <summary>Restores the scroll position after a rebind, driven by container prepares —
     /// the only post-rebind signal that provably fires. The rebind momentarily shrinks the
     /// extent, so the ScrollViewer CLAMPS the offset (deep positions land near 0): the position
@@ -1258,6 +1285,23 @@ public partial class TableView : ListView
     /// re-materializes correctly; retried every few prepares until the offset verifiably sits
     /// at the target (the extent may still be growing, re-clamping early attempts).</summary>
     private readonly List<object> _unoReanchorCandidates = new();
+
+    /// <summary>
+    /// The index of a row the viewport was showing before the source was re-pointed.
+    ///
+    /// <para>Plain IndexOf is right whenever the item is still in the list. It is useless against a
+    /// source that REBUILT — a virtualized tree grouped by its data hands back all-new objects, so
+    /// every captured row resolves to -1 and the re-anchor gives up. Such a source can place a stale
+    /// row itself, and is asked first.</para>
+    /// </summary>
+    private int ResolveAnchorIndex(object? item)
+    {
+        if (item is null)
+            return -1;
+        if (ItemsSource is VirtualTreeItemsSource tree)
+            return tree.ResolveAnchor(item);
+        return Items.IndexOf(item);
+    }
     private int _unoReseatBurstsLeft;
     private double _unoFinalHopTarget = -1;
 
@@ -1299,10 +1343,13 @@ public partial class TableView : ListView
         }
 
         var anchorIndex = -1;
-        foreach (var item in _unoReanchorCandidates)
+        if (AnchorRowIsMeaningful())
         {
-            anchorIndex = Items.IndexOf(item);
-            if (anchorIndex >= 0) break;
+            foreach (var item in _unoReanchorCandidates)
+            {
+                anchorIndex = ResolveAnchorIndex(item);
+                if (anchorIndex >= 0) break;
+            }
         }
 
         var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
@@ -1343,33 +1390,6 @@ public partial class TableView : ListView
         sv.ChangeView(null, target, null, disableAnimation: true);
     }
 
-    private bool HasOverlappingRealizedRows()
-    {
-        var seen = new List<(int Index, double Y)>();
-        foreach (var row in _rows)
-        {
-            var index = row.Index;
-            if (row.ActualHeight <= 0 || index < 0 || index >= Items.Count)
-            {
-                continue;
-            }
-            try
-            {
-                var y = row.TransformToVisual(this).TransformPoint(new Point(0, 0)).Y;
-                foreach (var other in seen)
-                {
-                    if ((index > other.Index && y < other.Y - 1) || (index < other.Index && y > other.Y + 1))
-                    {
-                        return true;
-                    }
-                }
-                seen.Add((index, y));
-            }
-            catch (ArgumentException) { }
-        }
-        return false;
-    }
-
     private void InvokeLayouterMethod(string name)
     {
         try
@@ -1404,10 +1424,13 @@ public partial class TableView : ListView
     private bool RestoreAnchorViaLayouter()
     {
         var anchorIndex = -1;
-        foreach (var item in _unoReanchorCandidates)
+        if (AnchorRowIsMeaningful())
         {
-            anchorIndex = Items.IndexOf(item);
-            if (anchorIndex >= 0) break;
+            foreach (var item in _unoReanchorCandidates)
+            {
+                anchorIndex = ResolveAnchorIndex(item);
+                if (anchorIndex >= 0) break;
+            }
         }
 
         try

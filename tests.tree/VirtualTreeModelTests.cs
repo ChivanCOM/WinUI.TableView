@@ -480,4 +480,344 @@ public class VirtualTreeModelTests
         // Full-materialization equality at the end.
         Assert.Equal(h.Reference(), h.Materialize());
     }
+
+    // ── keyed groups: surviving a rebuild ─────────────────────────────────────────────────────────
+    //
+    // A host that REBUILDS its skeleton (rather than mutating it) hands over brand new group objects
+    // every time. Reference identity cannot answer "where did that row go" across one, and a host
+    // with no answer can only put the reader back at the top — which is the whole complaint about
+    // editing a row in a twenty-thousand-row tree.
+
+    private static (VirtualTreeModel Model, List<Group> Roots) KeyedTree(int artists, int albums, int tracks)
+    {
+        var roots = new List<Group>();
+        for (var a = 0; a < artists; a++)
+        {
+            var artist = new Group { Name = $"artist{a:D3}", Depth = 0 };
+            for (var b = 0; b < albums; b++)
+                artist.Children.Add(new Group
+                {
+                    Name = $"artist{a:D3}/album{b:D2}", Depth = 1, LeafCount = tracks,
+                });
+            roots.Add(artist);
+        }
+
+        var model = new VirtualTreeModel(
+            childrenOf: n => ((Group)n).Children,
+            leafCountOf: n => n is Group g ? g.LeafCount : 0,
+            fetchLeaves: (g, offset, limit, ct) =>
+            {
+                var name = ((Group)g!).Name;
+                var rows = new List<object>(limit);
+                for (var i = 0; i < limit; i++)
+                    rows.Add($"{name}#{offset + i}");
+                return Task.FromResult<IReadOnlyList<object>>(rows);
+            },
+            placeholderOf: _ => "…",
+            // Asked about anything IndexOf is asked about, so it is a pattern match and not a cast.
+            groupKeyOf: n => n is Group g ? g.Name : null);
+        model.SetRoots(roots);
+        return (model, roots);
+    }
+
+    [Fact]
+    public void A_group_key_finds_its_row_and_agrees_with_IndexOf()
+    {
+        var (model, roots) = KeyedTree(artists: 5, albums: 3, tracks: 4);
+
+        var album = roots[2].Children[1];
+        var byKey = model.IndexOfGroupKey(album.Name);
+
+        Assert.True(byKey > 0);
+        Assert.Equal(byKey, model.IndexOf(album));
+        Assert.Same(album, model.GroupByKey(album.Name));
+        Assert.Same(album, model.GetAt(byKey));
+    }
+
+    [Fact]
+    public void A_leaf_is_located_from_its_group_and_offset_without_fetching_anything()
+    {
+        var (model, roots) = KeyedTree(artists: 4, albums: 2, tracks: 6);
+
+        var album = roots[1].Children[0];
+        var groupRow = model.IndexOfGroupKey(album.Name);
+
+        // Track 4 of that album is four rows past the album's own row (its leaves follow it).
+        Assert.Equal(groupRow + 1 + 4, model.FlatIndexOf(album.Name, 4));
+        // Past the end of the block is not a row.
+        Assert.Equal(-1, model.FlatIndexOf(album.Name, 6));
+        Assert.Equal(-1, model.FlatIndexOf("no-such-album", 0));
+    }
+
+    [Fact]
+    public void A_row_is_followed_across_a_rebuild_that_moves_it()
+    {
+        // The recognition case: a track sitting in "unknown" turns out to be a Muse track, so the
+        // next skeleton puts it under Muse instead — new objects throughout.
+        var unknown = new Group { Name = "unknown", Depth = 0 };
+        unknown.Children.Add(new Group { Name = "unknown/-", Depth = 1, LeafCount = 50 });
+        var before = new List<Group> { unknown };
+
+        var model = new VirtualTreeModel(
+            childrenOf: n => ((Group)n).Children,
+            leafCountOf: n => n is Group g ? g.LeafCount : 0,
+            fetchLeaves: (g, offset, limit, ct) => Task.FromResult<IReadOnlyList<object>>(
+                Enumerable.Range(offset, limit).Select(i => (object)$"row{i}").ToList()),
+            placeholderOf: _ => "…",
+            // Asked about anything IndexOf is asked about, so it is a pattern match and not a cast.
+            groupKeyOf: n => n is Group g ? g.Name : null);
+        model.SetRoots(before);
+
+        Assert.True(model.FlatIndexOf("unknown/-", 7) > 0);
+
+        // The rebuild: a fresh skeleton, entirely new objects, the track now under Muse.
+        var muse = new Group { Name = "muse", Depth = 0 };
+        muse.Children.Add(new Group { Name = "muse/absolution", Depth = 1, LeafCount = 1 });
+        var unknownAfter = new Group { Name = "unknown", Depth = 0 };
+        unknownAfter.Children.Add(new Group { Name = "unknown/-", Depth = 1, LeafCount = 49 });
+        model.SetRoots(new List<Group> { muse, unknownAfter });
+
+        // Where it went, from the key and the offset alone — no page fetched, nothing scanned.
+        var moved = model.FlatIndexOf("muse/absolution", 0);
+        Assert.Equal(model.IndexOfGroupKey("muse/absolution") + 1, moved);
+
+        // And the group it LEFT is still findable, one row shorter.
+        Assert.Equal(-1, model.FlatIndexOf("unknown/-", 49));
+        Assert.True(model.FlatIndexOf("unknown/-", 48) > 0);
+    }
+
+    [Fact]
+    public void A_key_that_is_no_longer_in_the_tree_answers_minus_one_rather_than_a_wrong_row()
+    {
+        var (model, roots) = KeyedTree(artists: 3, albums: 2, tracks: 5);
+        var gone = roots[1].Children[0].Name;
+
+        model.SetRoots(new List<Group> { roots[0] });
+
+        Assert.Equal(-1, model.IndexOfGroupKey(gone));
+        Assert.Equal(-1, model.FlatIndexOf(gone, 0));
+        Assert.Null(model.GroupByKey(gone));
+    }
+
+    [Fact]
+    public void A_collapsed_groups_leaves_have_no_index_but_the_group_still_does()
+    {
+        var (model, roots) = KeyedTree(artists: 3, albums: 2, tracks: 5);
+        var album = roots[0].Children[0];
+
+        roots[0].IsExpanded = false;
+
+        Assert.Equal(-1, model.IndexOfGroupKey(album.Name));   // the album row itself is hidden
+        Assert.Equal(-1, model.FlatIndexOf(album.Name, 0));
+        Assert.True(model.IndexOfGroupKey(roots[0].Name) >= 0);
+    }
+
+    [Fact]
+    public void IndexOf_tolerates_objects_that_are_not_rows_at_all()
+    {
+        // ItemsControl.IndexFromContainer asks IndexOf(container), and an automation peer asks it
+        // about a row — so a keyed host's key function is handed containers and foreign objects, not
+        // just its own rows. It answers null for those, and nothing here may throw on the way.
+        var (model, roots) = KeyedTree(artists: 3, albums: 2, tracks: 4);
+
+        Assert.Equal(-1, model.IndexOf("a string"));
+        Assert.Equal(-1, model.IndexOf(new object()));
+        Assert.Equal(-1, model.IndexOf(42));
+        Assert.Equal(-1, model.ResolveAnchor(new object()));
+
+        // And the real rows still resolve, so the guard did not cost the fast path.
+        Assert.True(model.IndexOf(roots[1]) > 0);
+        Assert.True(model.IndexOf(roots[1].Children[0]) > 0);
+    }
+
+    [Fact]
+    public void A_key_function_that_declines_a_group_leaves_it_findable_by_reference()
+    {
+        // A host may key only some of its rows. The unkeyed ones fall back to the segment scan
+        // rather than vanishing.
+        var roots = new List<Group>();
+        for (var a = 0; a < 4; a++)
+        {
+            var artist = new Group { Name = $"artist{a}", Depth = 0 };
+            artist.Children.Add(new Group { Name = $"artist{a}/album", Depth = 1, LeafCount = 3 });
+            roots.Add(artist);
+        }
+
+        var model = new VirtualTreeModel(
+            childrenOf: n => ((Group)n).Children,
+            leafCountOf: n => n is Group g ? g.LeafCount : 0,
+            fetchLeaves: (g, offset, limit, ct) => Task.FromResult<IReadOnlyList<object>>(
+                Enumerable.Range(offset, limit).Select(i => (object)$"row{i}").ToList()),
+            placeholderOf: _ => "…",
+            // Depth-1 groups only; the artists decline a key.
+            groupKeyOf: n => n is Group { Depth: 1 } g ? g.Name : null);
+        model.SetRoots(roots);
+
+        Assert.Equal(-1, model.IndexOfGroupKey("artist2"));
+        Assert.True(model.IndexOf(roots[2]) > 0);                    // still found, by reference
+        Assert.True(model.IndexOfGroupKey("artist2/album") > 0);     // and the keyed one by key
+    }
+
+    [Fact]
+    public void An_anchor_whose_slot_is_gone_answers_nothing_rather_than_somewhere_near()
+    {
+        // An anchor restores a POSITION. When the position no longer exists — the group shrank out
+        // from under it, which is what a mass removal does — the honest answer is "gone", so the
+        // caller keeps the offset it had. Answering with the group's own row instead sends the
+        // viewport on a long scroll to a place nobody asked for, and the restore loop then grinds
+        // trying to land on it.
+        var group = new Group { Name = "g", Depth = 0, LeafCount = 100 };
+        var model = new VirtualTreeModel(
+            childrenOf: n => ((Group)n).Children,
+            leafCountOf: n => n is Group g ? g.LeafCount : 0,
+            fetchLeaves: (g, offset, limit, ct) => Task.FromResult<IReadOnlyList<object>>(
+                Enumerable.Range(offset, limit).Select(i => (object)$"row{i}").ToList()),
+            placeholderOf: _ => "…",
+            groupKeyOf: n => n is Group g ? g.Name : null,
+            anchorOf: n => n is string s && s.StartsWith("row")
+                ? ("g", int.Parse(s[3..]))
+                : null);
+        model.SetRoots(new List<Group> { group });
+
+        Assert.Equal(model.IndexOfGroupKey("g") + 1 + 90, model.ResolveAnchor("row90"));
+
+        // The removal: the group keeps its identity but most of its rows are gone.
+        group.LeafCount = 10;
+        model.SetRoots(new List<Group> { group });
+
+        Assert.Equal(-1, model.ResolveAnchor("row90"));            // gone means gone
+        Assert.True(model.ResolveAnchor("row5") > 0);              // one that survived still places
+    }
+
+    // ── editing a row must not rebuild the tree ───────────────────────────────────────────────────
+
+    private sealed class MoveRig
+    {
+        public required VirtualTreeModel Model { get; init; }
+        public required Dictionary<string, List<string>> Rows { get; init; }
+        public required Dictionary<string, Group> Groups { get; init; }
+        public int Resets;
+        public readonly List<(int At, int Count)> Inserted = new();
+        public readonly List<(int At, int Count)> Removed = new();
+    }
+
+    /// <summary>Two albums with rows the test can move between them, exactly as an edit does.</summary>
+    private static MoveRig BuildMoveRig()
+    {
+        var rows = new Dictionary<string, List<string>>
+        {
+            ["a/one"] = ["a1", "a2", "a3"],
+            ["a/two"] = ["b1", "b2"],
+        };
+        var groups = new Dictionary<string, Group>();
+        var artist = new Group { Name = "a", Depth = 0 };
+        foreach (var key in rows.Keys)
+        {
+            var album = new Group { Name = key, Depth = 1, LeafCount = rows[key].Count };
+            groups[key] = album;
+            artist.Children.Add(album);
+        }
+
+        var model = new VirtualTreeModel(
+            childrenOf: n => ((Group)n).Children,
+            leafCountOf: n => n is Group g ? g.LeafCount : 0,
+            fetchLeaves: (g, offset, limit, ct) => Task.FromResult<IReadOnlyList<object>>(
+                rows[((Group)g!).Name].Skip(offset).Take(limit).Cast<object>().ToList()),
+            placeholderOf: _ => "…",
+            groupKeyOf: n => n is Group g ? g.Name : null);
+        model.SetRoots(new List<Group> { artist });
+
+        var rig = new MoveRig { Model = model, Rows = rows, Groups = groups };
+        model.ResetRaised += () => rig.Resets++;
+        model.RangeInserted += (at, n) => rig.Inserted.Add((at, n));
+        model.RangeRemoved += (at, n) => rig.Removed.Add((at, n));
+        return rig;
+    }
+
+    [Fact]
+    public void A_row_changing_group_is_one_removal_and_one_insertion_not_a_reset()
+    {
+        var rig = BuildMoveRig();
+
+        // Realize everything so the move has real rows to disturb.
+        for (var i = 0; i < rig.Model.Count; i++) rig.Model.GetAt(i);
+        var countBefore = rig.Model.Count;
+
+        // The edit: "a2" turns out to belong to the other album, in the middle of it.
+        rig.Rows["a/one"].Remove("a2");
+        rig.Groups["a/one"].LeafCount = 2;
+        rig.Rows["a/two"].Insert(1, "a2");
+        rig.Groups["a/two"].LeafCount = 3;
+
+        rig.Model.MoveLeaf(rig.Groups["a/one"], 1, rig.Groups["a/two"], 1);
+
+        Assert.Equal(0, rig.Resets);
+        Assert.Single(rig.Removed);
+        Assert.Single(rig.Inserted);
+        Assert.Equal(1, rig.Removed[0].Count);
+        Assert.Equal(1, rig.Inserted[0].Count);
+        Assert.Equal(countBefore, rig.Model.Count);   // one row left, one arrived
+
+        // And the projection genuinely reads the new way round.
+        var moved = rig.Model.IndexOfGroupKey("a/two") + 1 + 1;
+        Assert.Equal("a2", rig.Model.GetAt(moved));
+        Assert.DoesNotContain("a2", Enumerable.Range(0, 3)
+            .Select(i => rig.Model.GetAt(rig.Model.IndexOfGroupKey("a/one") + 1 + i) as string));
+    }
+
+    [Fact]
+    public void Moving_a_row_keeps_the_other_groups_pages_resident()
+    {
+        var rig = BuildMoveRig();
+        for (var i = 0; i < rig.Model.Count; i++) rig.Model.GetAt(i);
+
+        var untouched = new Group { Name = "a/three", Depth = 1, LeafCount = 2 };
+        rig.Rows["a/three"] = ["c1", "c2"];
+        rig.Groups["a/three"] = untouched;
+        // (already-built tree; this group is only here to be left alone)
+
+        var residentBefore = rig.Model.CachedLeaves().Count();
+        rig.Rows["a/one"].Remove("a1");
+        rig.Groups["a/one"].LeafCount = 2;
+        rig.Rows["a/two"].Add("a1");
+        rig.Groups["a/two"].LeafCount = 3;
+        rig.Model.MoveLeaf(rig.Groups["a/one"], 0, rig.Groups["a/two"], 2);
+
+        // Both touched groups dropped their pages; nothing else was disturbed. A Refresh would have
+        // emptied the cache entirely.
+        Assert.Equal(0, rig.Model.CachedLeaves().Count());
+        Assert.True(residentBefore > 0);
+    }
+
+    [Fact]
+    public void A_group_that_gained_rows_reports_the_run_that_appeared()
+    {
+        var rig = BuildMoveRig();
+        for (var i = 0; i < rig.Model.Count; i++) rig.Model.GetAt(i);
+
+        rig.Rows["a/one"].AddRange(["a4", "a5"]);
+        rig.Groups["a/one"].LeafCount = 5;
+        rig.Model.LeafCountChanged(rig.Groups["a/one"]);
+
+        Assert.Equal(0, rig.Resets);
+        Assert.Single(rig.Inserted);
+        Assert.Equal(2, rig.Inserted[0].Count);
+    }
+
+    [Fact]
+    public void A_group_that_lost_a_lot_of_rows_resets_rather_than_emitting_thousands_of_events()
+    {
+        var rig = BuildMoveRig();
+        rig.Rows["a/one"] = Enumerable.Range(0, 500).Select(i => $"x{i}").ToList();
+        rig.Groups["a/one"].LeafCount = 500;
+        rig.Model.LeafCountChanged(rig.Groups["a/one"]);
+        rig.Resets = 0; rig.Inserted.Clear(); rig.Removed.Clear();
+
+        rig.Rows["a/one"] = ["x0"];
+        rig.Groups["a/one"].LeafCount = 1;
+        rig.Model.LeafCountChanged(rig.Groups["a/one"]);
+
+        Assert.Equal(1, rig.Resets);          // 499 per-row events would cost more than a rebind
+        Assert.Empty(rig.Removed);
+    }
 }

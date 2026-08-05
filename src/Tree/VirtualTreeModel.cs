@@ -64,6 +64,8 @@ public sealed class VirtualTreeModel
     private const int FailureCooldownThreshold = 3;
 
     private readonly Func<object, IReadOnlyList<object>> _childrenOf;
+    private readonly Func<object, object?>? _groupKeyOf;
+    private readonly Func<object, (object GroupKey, int LeafOffset)?>? _anchorOf;
     private readonly Func<object?, int> _leafCountOf;
     private readonly FetchLeavesFn _fetchLeaves;
     private readonly Func<object?, object> _placeholderOf;
@@ -89,6 +91,10 @@ public sealed class VirtualTreeModel
     private readonly Dictionary<object, Segment> _leafSegmentByGroup = new(ReferenceEqualityComparer.Instance);
     private Segment? _rootLeafSegment;
     private bool _leafSegmentIndexValid;
+
+    // Group KEY → its row index and the object now carrying it. Only populated when the host supplied
+    // a key function. Built in the same lazy pass as the leaf-segment index.
+    private readonly Dictionary<object, (int Index, object Group)> _groupsByKey = new();
 
     private IReadOnlyList<object> _roots = Array.Empty<object>();
 
@@ -136,6 +142,17 @@ public sealed class VirtualTreeModel
 
     private CancellationTokenSource _cts = new();
 
+    /// <param name="groupKeyOf">
+    /// A stable identity for a group, independent of the object carrying it. <b>Returns null for
+    /// anything that is not one of the host's group rows</b>, and is handed whatever
+    /// <see cref="IndexOf"/> was handed — which the framework calls with containers, placeholders and
+    /// the odd foreign object, not only with rows. It must never assume its argument's type. Optional, and worth
+    /// supplying for any host that REBUILDS its skeleton rather than mutating it: a rebuild hands over
+    /// fresh group objects, so reference identity cannot answer "where did that row go" across one,
+    /// and without an answer the only honest thing a host can do after a rebuild is start again at
+    /// the top. Enables <see cref="IndexOfGroupKey"/> and <see cref="FlatIndexOf"/>, and makes group
+    /// <see cref="IndexOf"/> a lookup instead of a scan of every segment.
+    /// </param>
     public VirtualTreeModel(
         Func<object, IReadOnlyList<object>> childrenOf,
         Func<object?, int> leafCountOf,
@@ -145,9 +162,13 @@ public sealed class VirtualTreeModel
         int pageSize = 200,
         int maxPagesCached = 64,
         int maxConcurrentFetches = 2,
-        int failureCooldownMs = 1000)
+        int failureCooldownMs = 1000,
+        Func<object, object?>? groupKeyOf = null,
+        Func<object, (object GroupKey, int LeafOffset)?>? anchorOf = null)
     {
         _childrenOf = childrenOf;
+        _groupKeyOf = groupKeyOf;
+        _anchorOf = anchorOf;
         _leafCountOf = leafCountOf;
         _fetchLeaves = fetchLeaves;
         _placeholderOf = placeholderOf;
@@ -213,6 +234,119 @@ public sealed class VirtualTreeModel
         ResetRaised?.Invoke();
     }
 
+    /// <summary>
+    /// One leaf changed which group it belongs to — the row moved, and nothing else did.
+    ///
+    /// <para>The host has already updated whatever <c>leafCountOf</c> reads (its own group counts)
+    /// and the store behind <c>fetchLeaves</c>. This works out where the row was and where it now is
+    /// and says exactly that: one removal and one insertion. It is the whole of what an edit does to
+    /// a tree grouped by its data, and the reason a rebuild is not required to express it.</para>
+    ///
+    /// <para>Only the two affected groups' pages are dropped, so everything else on screen stays
+    /// resident — a reset would have thrown away the entire viewport to move one row.</para>
+    /// </summary>
+    /// <param name="fromGroup">The group the row was in, or null for the root leaf block.</param>
+    /// <param name="fromOffset">Its position within that group before the change.</param>
+    /// <param name="toGroup">The group it is in now.</param>
+    /// <param name="toOffset">Its position within that group now.</param>
+    public void MoveLeaf(object? fromGroup, int fromOffset, object? toGroup, int toOffset)
+    {
+        // Where it WAS, read off the projection as it still stands.
+        var removedAt = FindLeafSegment(fromGroup) is { } fromSeg && fromOffset < fromSeg.Length
+            ? fromSeg.Start + fromOffset
+            : -1;
+
+        InvalidateGroupPages(fromGroup);
+        if (!ReferenceEquals(fromGroup, toGroup))
+            InvalidateGroupPages(toGroup);
+
+        // The counts the host just changed are what the segments are built from.
+        RebuildSegments();
+
+        var insertedAt = FindLeafSegment(toGroup) is { } toSeg && toOffset < toSeg.Length
+            ? toSeg.Start + toOffset
+            : -1;
+
+        // A group that appeared or vanished shifts more than the two rows, and a host that got its
+        // offsets wrong must not be allowed to corrupt the projection — say so honestly instead.
+        if (removedAt < 0 || insertedAt < 0)
+        {
+            ResetRaised?.Invoke();
+            return;
+        }
+
+        // Sequential, and in this order: the consumer applies the removal first, so the insertion
+        // index is the one in the FINAL projection — which is exactly what the rebuilt segments give.
+        RangeRemoved?.Invoke(removedAt, 1);
+        RangeInserted?.Invoke(insertedAt, 1);
+    }
+
+    /// <summary>
+    /// A group's leaf count changed — rows were added to it or taken out of it — without any single
+    /// row moving somewhere identifiable. Emits the run that appeared or disappeared, or a reset when
+    /// the delta is large enough that per-row events would cost more than a rebind
+    /// (<see cref="BulkDeltaThreshold"/>, the same rule expand/collapse answers to).
+    /// </summary>
+    public void LeafCountChanged(object? group)
+    {
+        var before = FindLeafSegment(group);
+        var beforeLength = before?.Length ?? 0;
+        var beforeStart = before?.Start ?? -1;
+
+        InvalidateGroupPages(group);
+        RebuildSegments();
+
+        var after = FindLeafSegment(group);
+        var afterLength = after?.Length ?? 0;
+        var delta = afterLength - beforeLength;
+
+        if (delta == 0)
+            return;
+
+        var at = after?.Start ?? beforeStart;
+        if (at < 0 || Math.Abs(delta) > BulkDeltaThreshold)
+        {
+            ResetRaised?.Invoke();
+            return;
+        }
+
+        if (delta > 0)
+            RangeInserted?.Invoke(at + beforeLength, delta);
+        else
+            RangeRemoved?.Invoke(at + afterLength, -delta);
+    }
+
+    /// <summary>Drops one group's cached pages and everything that pointed into them, leaving every
+    /// other group resident. The blunt <see cref="Refresh"/> drops all of them.</summary>
+    public void InvalidateGroupPages(object? group)
+    {
+        var doomed = new List<(object? Group, int Page)>();
+        foreach (var key in _pages.Keys)
+        {
+            if (ReferenceEquals(key.Group, group))
+                doomed.Add(key);
+        }
+
+        foreach (var key in doomed)
+        {
+            if (_pages.TryGetValue(key, out var buffer))
+            {
+                foreach (var row in buffer)
+                {
+                    if (row is null)
+                        continue;
+                    if (row is INotifyPropertyChanged npc && _subscribedLeaves.Remove(npc))
+                        npc.PropertyChanged -= OnLeafPropertyChanged;
+                    DeindexLeaf(key, row);
+                }
+            }
+            _pages.Remove(key);
+            DropPlaceholderPage(key);
+            if (_pageLruNodes.Remove(key, out var node))
+                _pageLru.Remove(node);
+        }
+    }
+
     private void CancelFetches()
     {
         var old = _cts;
@@ -258,15 +392,7 @@ public sealed class VirtualTreeModel
         // Not found = the group sits under a collapsed ancestor; nothing
         // visible changes, and the rebuilt-on-next-toggle segments will
         // pick the new state up.
-        var groupIndex = -1;
-        foreach (var seg in _segments)
-        {
-            if (!seg.IsLeafBlock && ReferenceEquals(seg.Group, sender))
-            {
-                groupIndex = seg.Start;
-                break;
-            }
-        }
+        var groupIndex = IndexOf(sender);
 
         var oldCount = _count;
         RebuildSegments();
@@ -543,6 +669,20 @@ public sealed class VirtualTreeModel
             return flat < pseg.Start + pseg.Length ? flat : -1;
         }
 
+        // A keyed host resolves group rows by lookup. Reference-checked afterwards, because two
+        // objects can share a key across a rebuild and only the one in the tree has an index.
+        // Anything at all can arrive here — ItemsControl.IndexFromContainer asks IndexOf(container),
+        // and an automation peer asks it about a row. So the key function is asked, not told, and a
+        // null answer means "not one of mine" rather than an error.
+        if (_groupKeyOf is not null)
+        {
+            EnsureSegmentIndex();
+            if (_groupKeyOf(item) is { } key
+                && _groupsByKey.TryGetValue(key, out var byKey)
+                && ReferenceEquals(byKey.Group, item))
+                return byKey.Index;
+        }
+
         DiagIndexOfScans++;
         foreach (var seg in _segments)
         {
@@ -552,16 +692,94 @@ public sealed class VirtualTreeModel
         return -1;
     }
 
+    /// <summary>
+    /// The flat row index of the group with this key, or -1 when it is not in the tree — collapsed
+    /// under an ancestor, filtered out, or gone. O(1).
+    /// </summary>
+    public int IndexOfGroupKey(object key)
+    {
+        EnsureSegmentIndex();
+        return _groupsByKey.TryGetValue(key, out var found) ? found.Index : -1;
+    }
+
+    /// <summary>The group object now carrying this key, or null. A rebuild replaces the objects; the
+    /// key is what survives.</summary>
+    public object? GroupByKey(object key)
+    {
+        EnsureSegmentIndex();
+        return _groupsByKey.TryGetValue(key, out var found) ? found.Group : null;
+    }
+
+    /// <summary>
+    /// Where a LEAF sits: the flat index of the row <paramref name="leafOffset"/> places into the
+    /// leaf block of the group with this key, or -1 when that group is not showing or the offset is
+    /// past its end.
+    ///
+    /// <para>This is the answer to "where did that row go" after a rebuild moved it — the host knows
+    /// which group a row landed in and its position within it (its store can say so cheaply); the
+    /// model turns that into the row index the viewport needs, without any page being fetched.</para>
+    /// </summary>
+    public int FlatIndexOf(object groupKey, int leafOffset)
+    {
+        EnsureSegmentIndex();
+        if (leafOffset < 0 || !_groupsByKey.TryGetValue(groupKey, out var found))
+            return -1;
+        if (FindLeafSegment(found.Group) is not { } seg || leafOffset >= seg.Length)
+            return -1;
+        return seg.Start + leafOffset;
+    }
+
+    /// <summary>
+    /// Where this row is NOW, for re-anchoring a viewport across a rebuild — the row's own index when
+    /// it is still in the tree, and otherwise the index of whatever took its place.
+    ///
+    /// <para>A rebuild replaces every group object and drops every cached leaf, so the items a
+    /// viewport was showing a moment ago are all stale references and <see cref="IndexOf"/> answers
+    /// -1 for every one of them. A host that can say which group a stale row belonged to, and how far
+    /// into it (the <c>anchorOf</c> constructor argument), gets a real index back instead — which is
+    /// the difference between a rebuild that keeps the reader's place and one that drops them
+    /// wherever the panel happens to land.</para>
+    /// </summary>
+    public int ResolveAnchor(object? item)
+    {
+        if (item is null)
+            return -1;
+
+        var direct = IndexOf(item);
+        if (direct >= 0)
+            return direct;
+
+        if (_anchorOf?.Invoke(item) is not { } a)
+            return -1;
+
+        // Exactly where that slot is now, or nothing. NOT a fallback to the group's own row: an
+        // anchor exists to keep a position, not to chase a row across the list, and answering with
+        // somewhere-in-the-region turns a re-anchor into a long scroll to a place the reader never
+        // asked for. A caller that genuinely wants to FOLLOW a row asks for it by name.
+        return FlatIndexOf(a.GroupKey, a.LeafOffset);
+    }
+
+    private void EnsureSegmentIndex()
+    {
+        if (!_leafSegmentIndexValid)
+            FindLeafSegment(null);   // the one place that builds both indexes
+    }
+
     private Segment? FindLeafSegment(object? group)
     {
         if (!_leafSegmentIndexValid)
         {
             _leafSegmentByGroup.Clear();
+            _groupsByKey.Clear();
             _rootLeafSegment = null;
             foreach (var seg in _segments)
             {
                 if (!seg.IsLeafBlock)
+                {
+                    if (_groupKeyOf is not null && seg.Group is { } g && _groupKeyOf(g) is { } key)
+                        _groupsByKey[key] = (seg.Start, g);
                     continue;
+                }
                 if (seg.Group is null)
                     _rootLeafSegment = seg;
                 else

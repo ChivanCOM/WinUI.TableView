@@ -54,7 +54,10 @@ public static class Scenarios
                 return p;
             },
             pageSize: pageSize,
-            maxPagesCached: maxPages);
+            maxPagesCached: maxPages,
+            // The import grid rebuilds its skeleton on every metadata edit, so its groups are new
+            // objects each time and only a key can follow a row across one.
+            groupKeyOf: n => n is BenchNode { IsPlaceholder: false } b ? b.Name : null);
 
         var host = new GridHost(model);
         host.SetRoots(roots);
@@ -437,4 +440,100 @@ public static class Scenarios
         m.Add(("relayed", rig.Host.LeafChanges.ToString("N0")));
         return Finish(rig, "leaf-update-storm", m);
     }
+
+    // ── 11. Edit a track, rebuild the skeleton, keep the reader's place ──────────────────────────
+    //
+    // The import queue's own shape: the tree is grouped by what the tags SAY, so editing an artist
+    // or recognising a track moves the row to a different branch and the whole skeleton is rebuilt.
+    // Two things must survive that: the viewport (a rebuild that dumps the reader at the top makes
+    // every edit cost a scroll back) and the row itself (a recognised track that silently teleports
+    // into a twenty-thousand-row tree is, from the user's side, simply gone).
+
+    public static Result RebuildAnchor(Rig rig, int rebuilds = 30)
+    {
+        rig.Pump.Ui(() => { rig.Model.SetRoots(rig.Roots); rig.Host.ScrollTo(0); });
+        rig.Pump.PumpUntilIdle();
+
+        var m = new List<(string, string)>();
+        var problems = new List<string>();
+
+        // Park the viewport in the middle, where a lost anchor is most obvious.
+        var middle = rig.Model.Count / 2;
+        rig.Pump.Ui(() => rig.Host.ScrollTo(middle));
+        rig.Pump.PumpUntilIdle();
+
+        // What the host would hold on to: the first visible GROUP row's key, and how far into its
+        // block the top row sits.
+        var anchorKey = FirstVisibleGroupKey(rig, out var anchorOffset);
+        if (anchorKey is null) problems.Add("no group row in the viewport to anchor on");
+
+        rig.Host.ResetStats(); rig.Pump.ResetStats(); rig.Backend.ResetStats();
+
+        // A rebuild hands over a COMPLETELY fresh skeleton — new objects, same keys — which is what
+        // the store's GROUP BY produces every time.
+        var sw = Stopwatch.StartNew();
+        var recovered = 0;
+        for (var i = 0; i < rebuilds; i++)
+        {
+            var fresh = SkeletonFactory.Build(rig.Shape, out _);
+            rig.Pump.CurrentLabel = $"rebuild-anchor/rebuild{i}";
+            rig.Pump.Ui(() =>
+            {
+                // The host owns the skeleton and hands it to the model — both sides swap together,
+                // exactly as the real one does when its store re-runs the GROUP BY.
+                rig.Host.SetRoots(fresh);
+                rig.Model.SetRoots(fresh);
+                if (anchorKey is not null && rig.Model.FlatIndexOf(anchorKey, anchorOffset) is var at and >= 0)
+                {
+                    rig.Host.ScrollTo(at);
+                    recovered++;
+                }
+            });
+        }
+        var perRebuild = sw.Elapsed.TotalMilliseconds / rebuilds;
+        m.Add(("rebuild + re-anchor ms", $"{perRebuild:F2}"));
+        m.Add(("anchor recovered", $"{recovered}/{rebuilds}"));
+        if (recovered != rebuilds) problems.Add($"anchor lost on {rebuilds - recovered} rebuilds");
+
+        // The lookup itself, which is what makes the re-anchor affordable at all.
+        var keys = new List<string>();
+        foreach (var artist in rig.Roots)
+        foreach (var album in artist.Children)
+            keys.Add(album.Name);
+
+        sw.Restart();
+        var found = 0;
+        foreach (var k in keys)
+            if (rig.Model.IndexOfGroupKey(k) >= 0) found++;
+        m.Add(($"IndexOfGroupKey ×{keys.Count:N0} ms", $"{sw.Elapsed.TotalMilliseconds:F1}"));
+        m.Add(("     per lookup µs", $"{sw.Elapsed.TotalMilliseconds * 1000 / keys.Count:F2}"));
+        if (found != keys.Count) problems.Add($"{keys.Count - found} album keys did not resolve");
+
+        // And the same question asked the old way — the segment scan every non-keyed host falls to.
+        sw.Restart();
+        foreach (var artist in rig.Roots)
+            rig.Model.IndexOf(artist);
+        m.Add(($"IndexOf ×{rig.Roots.Count:N0} (group objects) ms", $"{sw.Elapsed.TotalMilliseconds:F1}"));
+
+        var result = Finish(rig, "rebuild-anchor", m);
+        result.Problems.AddRange(problems);
+        return result;
+    }
+
+    /// <summary>The key of the first group row at or after the viewport top, and how far past it the
+    /// top row sits — the pair a host stores to put the reader back where they were.</summary>
+    private static string? FirstVisibleGroupKey(Rig rig, out int offset)
+    {
+        offset = 0;
+        for (var i = rig.Host.FirstVisible; i < rig.Model.Count && i < rig.Host.FirstVisible + 200; i++)
+        {
+            if (rig.Model.PeekAt(i) is BenchNode { IsPlaceholder: false } n && n.HasChildren)
+            {
+                offset = 0;
+                return n.Name;
+            }
+        }
+        return null;
+    }
+
 }

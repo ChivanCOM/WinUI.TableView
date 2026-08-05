@@ -46,6 +46,7 @@ var all = new (string Name, Func<Scenarios.Rig, Scenarios.Result> Run)[]
     ("lru-thrash", Scenarios.LruThrash),
     ("selection-ops", Scenarios.SelectionOps),
     ("leaf-update-storm", Scenarios.LeafUpdateStorm),
+    ("rebuild-anchor", r => Scenarios.RebuildAnchor(r)),
 };
 
 if (names.Count == 0 || names.Contains("all"))

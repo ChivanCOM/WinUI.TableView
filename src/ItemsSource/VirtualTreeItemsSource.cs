@@ -51,6 +51,11 @@ public sealed class VirtualTreeItemsSource : ITableViewItemsSource, IList
     /// <summary>The underlying model, for host-side structure updates.</summary>
     public VirtualTreeModel Model => _model;
 
+    /// <summary>Where a row the viewport was showing is now — see
+    /// <see cref="VirtualTreeModel.ResolveAnchor"/>. TableView uses this when re-anchoring after a
+    /// source re-point, because a rebuilt tree hands back none of the objects it captured.</summary>
+    public int ResolveAnchor(object? item) => _model.ResolveAnchor(item);
+
     // ── Model change translation ────────────────────────────────────
 
     private static readonly bool Trace = Environment.GetEnvironmentVariable("TREEGRID_TRACE") == "1";
