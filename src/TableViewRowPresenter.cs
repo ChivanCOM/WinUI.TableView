@@ -146,14 +146,13 @@ public partial class TableViewRowPresenter : Control
             var xScroll = -TableView.HorizontalOffset;
             var xClip = TableView.HorizontalOffset;
 
-            // Shifted, not re-arranged. Both of these moves are a horizontal slide of an element
-            // that base.ArrangeOverride has already laid out at the right size — but calling
-            // Arrange again with a different origin makes the panel arrange all of its children
-            // again, so every row was arranging its whole set of cells twice on every pass. A
-            // translation moves the same laid-out subtree and leaves the children alone; it also
-            // participates in hit-testing and in TransformToVisual, which is what the grid-line
-            // offset below and the drag-selection hit test read.
-            Shift(_rootPanel, left);
+            // These two Arrange calls re-arrange every cell in the row, twice per pass, and a
+            // RenderTransform would move the same laid-out subtree for nothing. It was tried, and
+            // it is reverted: cells went blank in the real grid in a way this repository's harness
+            // could not reproduce — the content was present, sized and visible by every measure the
+            // harness can take, and still did not paint. Arrange is what the row's geometry is
+            // built on; until the difference is understood, it stays.
+            _rootPanel?.Arrange(new(left, 0, Math.Max(0, _rootPanel.ActualWidth), _rootPanel.ActualHeight));
 
             if (_detailsPanel?.Visibility is Visibility.Visible && _v_gridLine is not null)
             {
@@ -175,9 +174,20 @@ public partial class TableViewRowPresenter : Control
                 var frozenRight = _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
                 xScroll += frozenRight;
 
-                Shift(_scrollableCellsPanel, xScroll);
-                Clip(_scrollableCellsPanel, ref _scrollableClip, xScroll >= frozenRight ? null :
-                    new Rect(xClip, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - xClip), _scrollableCellsPanel.ActualHeight));
+                _scrollableCellsPanel.Arrange(new(xScroll, 0, _scrollableCellsPanel.ActualWidth, _scrollableCellsPanel.ActualHeight));
+
+                // Assigned on every arrange, deliberately. Both cheaper versions of this were
+                // tried — reusing one geometry and moving its Rect, and skipping the assignment
+                // when the rectangle had not changed — and both produced a grid whose every cell
+                // was empty: an early arrange, before these panels have a width, computes a clip
+                // of zero width, and nothing that leaves the property alone afterwards ever undoes
+                // it. Every element inside then reports itself present, visible and correctly
+                // sized, and paints nothing. The allocation is the price of the clip taking.
+                _scrollableCellsPanel.Clip = xScroll >= frozenRight ? null :
+                    new RectangleGeometry
+                    {
+                        Rect = new(xClip, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - xClip), _scrollableCellsPanel.ActualHeight)
+                    };
             }
 
 
@@ -205,61 +215,6 @@ public partial class TableViewRowPresenter : Control
     }
 
     private (double, Visibility, double, double) _gridLineOffsetKey = (double.NaN, default, double.NaN, double.NaN);
-    private RectangleGeometry? _scrollableClip;
-
-    /// <summary>Slides an already-arranged element so its left edge lands on <paramref name="x"/>,
-    /// without asking it — or its children — to lay out again.</summary>
-    private static void Shift(FrameworkElement? element, double x)
-    {
-        if (element is null)
-        {
-            return;
-        }
-
-        var delta = x - element.ActualOffset.X;
-
-        if (element.RenderTransform is not TranslateTransform translate)
-        {
-            if (delta == 0)
-            {
-                return;   // nothing to correct, and no transform worth allocating
-            }
-
-            element.RenderTransform = translate = new TranslateTransform();
-        }
-
-        // ActualOffset is where base.ArrangeOverride put it and is unaffected by the transform, so
-        // this stays a correction from the laid-out position rather than accumulating.
-        if (translate.X != delta)
-        {
-            translate.X = delta;
-        }
-    }
-
-    /// <summary>Clips an element to <paramref name="rect"/>, reusing the geometry rather than
-    /// allocating one per row per arrange. Null removes the clip.</summary>
-    private static void Clip(FrameworkElement element, ref RectangleGeometry? geometry, Rect? rect)
-    {
-        if (rect is not { } r)
-        {
-            if (element.Clip is not null)
-            {
-                element.Clip = null;
-            }
-            return;
-        }
-
-        geometry ??= new RectangleGeometry();
-        if (geometry.Rect != r)
-        {
-            geometry.Rect = r;
-        }
-
-        if (!ReferenceEquals(element.Clip, geometry))
-        {
-            element.Clip = geometry;
-        }
-    }
 
     /// <summary>
     /// Sets the DataTemplate for the row header.

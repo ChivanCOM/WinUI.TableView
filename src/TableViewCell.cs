@@ -177,8 +177,7 @@ public partial class TableViewCell : ContentControl
             // columns meant nineteen extra full content measures per row, plus four dependency
             // property writes per cell to clear and restore the clamps around them.
             var autoSizeMode = Column.ColumnAutoWidthMode ?? TableView.ColumnAutoWidthMode;
-            if (Column.Width.IsAuto
-                && autoSizeMode is TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both)
+            if (autoSizeMode is TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both)
             {
                 #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
                 element.MaxWidth = double.PositiveInfinity;

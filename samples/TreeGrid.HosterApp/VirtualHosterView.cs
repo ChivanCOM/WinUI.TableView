@@ -81,6 +81,12 @@ public sealed partial class VirtualHosterView : Grid
             ShowExportOptions = false,
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
         };
+        if (MusicPath is not null)
+        {
+            AddQueueColumns();
+        }
+        else
+        {
         _table.Columns.Add(new TableViewTreeColumn
         {
             Header = "Name",
@@ -102,10 +108,11 @@ public sealed partial class VirtualHosterView : Grid
             IsReadOnly = true,
             Binding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.Title)) },
         });
+        }
         // --columns N: pad out to N columns. Three columns hide everything that costs PER CELL,
         // and the grid this stack exists for (the import queue) shows nineteen. A row realizing
         // nineteen cells is where per-cell work stops being a rounding error.
-        for (var i = _table.Columns.Count; i < ExtraColumns; i++)
+        for (var i = _table.Columns.Count; i < ExtraColumns && MusicPath is null; i++)
         {
             // Every fifth one is a TEMPLATE column, because the grid this stack exists for marks
             // its rows with them (the check, the state glyph, the duplicate badge) and they take a
@@ -154,6 +161,377 @@ public sealed partial class VirtualHosterView : Grid
         };
     }
 
+    /// <summary>The dump to read a real collection from — <c>--music &lt;path.tsv&gt;</c>.</summary>
+    private static readonly string? MusicPath = ReadArg("--music");
+
+    /// <summary>Cap on how much of it to load — <c>--tracks N</c>, for scaling runs.</summary>
+    private static readonly int MusicLimit =
+        int.TryParse(ReadArg("--tracks"), out var n) ? n : int.MaxValue;
+
+    private static string? ReadArg(string name)
+    {
+        var args = Environment.GetCommandLineArgs();
+        var at = Array.IndexOf(args, name);
+        return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
+    }
+
+    private MusicLibrary? _music;
+
+    /// <summary>
+    /// The import queue's own columns, at its own widths: three template marks, the tree, and
+    /// eighteen text columns — 2452px of them, which is why that grid is nearly always scrolled
+    /// sideways and why horizontal scrolling is worth measuring at all.
+    /// </summary>
+    private void AddQueueColumns()
+    {
+        // The tick. A Viewbox around a CheckBox, as the queue has it — the heaviest cell in the row.
+        _table.Columns.Add(new TableViewTemplateColumn
+        {
+            Header = "",
+            Width = new GridLength(30),
+            CellTemplate = (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
+                """
+                <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+                  <Viewbox Width="14" Height="14" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}"
+                              MinWidth="0" MinHeight="0" Width="20" Height="20" Padding="0" Margin="0"/>
+                  </Viewbox>
+                </DataTemplate>
+                """),
+        });
+
+        // The state mark and the duplicate badge.
+        for (var i = 0; i < 2; i++)
+        {
+            _table.Columns.Add(new TableViewTemplateColumn
+            {
+                Header = "",
+                Width = new GridLength(26),
+                CellTemplate = MarkTemplate(),
+            });
+        }
+
+        _table.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(260),
+            Binding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.Name)) },
+            GlyphBinding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.Glyph)) },
+        });
+
+        foreach (var (header, width, path) in new (string, int, string)[]
+        {
+            ("Folder", 180, nameof(DemoNode.ColFolder)),
+            ("Title", 190, nameof(DemoNode.ColTitle)),
+            ("Artist", 150, nameof(DemoNode.ColArtist)),
+            ("Album", 150, nameof(DemoNode.ColAlbum)),
+            ("Album artist", 150, nameof(DemoNode.ColAlbumArtist)),
+            ("#", 56, nameof(DemoNode.ColTrack)),
+            ("Disc", 48, nameof(DemoNode.ColDisc)),
+            ("Disc title", 130, nameof(DemoNode.ColDiscTitle)),
+            ("Year", 64, nameof(DemoNode.ColYear)),
+            ("Genre", 120, nameof(DemoNode.ColGenre)),
+            ("Length", 70, nameof(DemoNode.ColLength)),
+            ("Kind", 70, nameof(DemoNode.ColKind)),
+            ("Codec", 120, nameof(DemoNode.ColCodec)),
+            ("Bitrate", 86, nameof(DemoNode.ColBitrate)),
+            ("Sample rate", 90, nameof(DemoNode.ColSampleRate)),
+            ("Bit depth", 76, nameof(DemoNode.ColBitDepth)),
+            ("Channels", 80, nameof(DemoNode.ColChannels)),
+            ("Size", 80, nameof(DemoNode.ColSize)),
+            ("File", 200, nameof(DemoNode.ColFile)),
+        })
+        {
+            _table.Columns.Add(new TableViewTextColumn
+            {
+                Header = header,
+                Width = new GridLength(width),
+                IsReadOnly = true,
+                Binding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(path) },
+            });
+        }
+    }
+
+    /// <summary>
+    /// Are the cells actually SHOWING anything?
+    ///
+    /// <para>Every other check in this harness asks whether the right rows are realized in the
+    /// right places. None of them looks inside a cell, so a grid whose cells are all present,
+    /// correctly sized and completely empty passes the lot. This walks the realized rows at each
+    /// of several horizontal offsets — starting at nought, which is where a grid opens and where
+    /// the cells were found blank — and counts the ones whose content is missing or has no size.
+    /// </para>
+    /// </summary>
+    private async Task PaintProbeAsync()
+    {
+        await SettleAsync();
+        _scrollViewer ??= FindScrollViewer(_table);
+
+        var failures = new List<string>();
+        var inkByOffset = new Dictionary<double, int>();
+
+        foreach (var offset in new double[] { 0, 4, 40, 400, 0 })
+        {
+            // Sideways scrolling in this grid is not a ScrollViewer moving: the horizontal scroll
+            // bar is bound two-way to TableView.HorizontalOffset, and every row's arrange reads
+            // that to place its cells. Setting it is what a drag of that bar does.
+            _table.SetValue(TableView.HorizontalOffsetProperty, offset);
+            _table.UpdateLayout();
+            await Task.Delay(150);
+
+            // What actually reached the screen. Asking the elements whether they are visible and
+            // sized is asking the wrong witness — a cell can answer yes to all of it and still
+            // paint nothing. Rendering the grid and counting the pixels that are not the
+            // background is the only answer that cannot be argued with.
+            var ink = await InkPerRowAsync();
+            if (ink is not null)
+            {
+                var median = ink.OrderBy(v => v).ElementAt(ink.Count / 2);
+                inkByOffset[offset] = median;
+                Console.WriteLine($"[hoster:paint] ink offset={offset:F0}: bands={ink.Count} "
+                    + $"empty={ink.Count(v => v == 0)} min={ink.Min()} median={median}");
+            }
+
+            var rows = RealizedRows();
+            var blankCells = 0;
+            var blankRows = 0;
+            var checkedCells = 0;
+
+            foreach (var row in rows)
+            {
+                if (row.DataContext is not DemoNode node || node.Name is "…")
+                {
+                    continue;   // a placeholder is meant to be empty
+                }
+
+                var blankHere = 0;
+                foreach (var cell in row.Cells)
+                {
+                    // A cell paints nothing when its content is gone, hidden, or has no size.
+                    var presenter = FindContentPresenter(cell);
+                    var hidden = presenter is null || presenter.Visibility != Visibility.Visible;
+                    var empty = cell.Content is not FrameworkElement { ActualWidth: > 0, ActualHeight: > 0 };
+
+                    checkedCells++;
+                    if (hidden || empty)
+                    {
+                        blankHere++;
+                    }
+                }
+
+                blankCells += blankHere;
+                if (blankHere == row.Cells.Count && row.Cells.Count > 0)
+                {
+                    blankRows++;
+                }
+            }
+
+            var line = $"[hoster:paint] asked={offset,4:F0} actual={_table.HorizontalOffset:F0} "
+                + $"scrollable={HorizontalScrollViewer()?.ScrollableWidth ?? -1:F0} "
+                + $"rows={rows.Count} cells={checkedCells} "
+                + $"blankCells={blankCells} fullyBlankRows={blankRows}";
+            Console.WriteLine(line);
+
+            if (blankRows > 0)
+            {
+                failures.Add($"offset {offset:F0}: {blankRows} rows painted nothing at all");
+            }
+        }
+
+        // The check that matters, and the one the first version of this probe was too weak to make:
+        // scrolling sideways moves the columns, it does not change how much there is to draw. So
+        // every offset should paint about as much as the best of them. Half is not a rounding
+        // error — half is the grid at rest showing empty cells and filling them in the moment you
+        // nudge it, which is exactly what a stale clip did.
+        if (inkByOffset.Count > 1)
+        {
+            var best = inkByOffset.Values.Max();
+            foreach (var (offset, painted) in inkByOffset)
+            {
+                if (painted < best * 0.6)
+                {
+                    failures.Add($"offset {offset:F0} painted {painted} where the best offset painted {best}");
+                }
+            }
+        }
+
+        var ok = failures.Count == 0;
+        Console.WriteLine(ok
+            ? "[hoster:paint] PASS — every realized row painted its cells at every offset"
+            : $"[hoster:paint] FAIL — {string.Join("; ", failures)}");
+        Finish(ok);
+    }
+
+    /// <summary>
+    /// Renders the grid and counts, for each row-height band, how many pixels differ from the most
+    /// common colour in that band. A band that draws text and glyphs has thousands; a band that
+    /// draws only its own background has none.
+    /// </summary>
+    private async Task<List<int>?> InkPerRowAsync()
+    {
+        var bitmap = new Microsoft.UI.Xaml.Media.Imaging.RenderTargetBitmap();
+        try
+        {
+            await bitmap.RenderAsync(_table);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[hoster:paint] could not render: {e.GetType().Name} {e.Message}");
+            return null;
+        }
+
+        var buffer = await bitmap.GetPixelsAsync();
+        var pixels = new byte[buffer.Length];
+        using (var reader = Windows.Storage.Streams.DataReader.FromBuffer(buffer))
+        {
+            reader.ReadBytes(pixels);
+        }
+
+        var width = bitmap.PixelWidth;
+        var height = bitmap.PixelHeight;
+        if (width <= 0 || height <= 0 || pixels.Length < width * height * 4)
+        {
+            Console.WriteLine($"[hoster:paint] empty render {width}x{height} ({pixels.Length} bytes)");
+            return null;
+        }
+
+        SavePng(pixels, width, height);
+
+        // The bitmap is in physical pixels; the rows are in logical ones.
+        var scale = height / Math.Max(1.0, _table.ActualHeight);
+        var band = Math.Max(1, (int)Math.Round(RowHeight * scale));
+        var headerRows = 2;   // skip the header strip, which always paints
+
+        var ink = new List<int>();
+        for (var top = band * headerRows; top + band <= height; top += band)
+        {
+            var counts = new Dictionary<uint, int>();
+            for (var y = top; y < top + band; y++)
+            {
+                for (var x = 0; x < width; x++)
+                {
+                    var i = (y * width + x) * 4;
+                    var argb = (uint)(pixels[i] | (pixels[i + 1] << 8) | (pixels[i + 2] << 16) | (pixels[i + 3] << 24));
+                    counts[argb] = counts.TryGetValue(argb, out var n) ? n + 1 : 1;
+                }
+            }
+
+            var total = band * width;
+            var background = counts.Values.Max();
+            ink.Add(total - background);
+        }
+
+        return ink;
+    }
+
+    private void SavePng(byte[] bgra, int width, int height)
+    {
+        if (ReadArg("--png") is not { } stem)
+        {
+            return;
+        }
+
+        var path = stem.Replace(".png", $"-{_pngSequence++}.png");
+
+        // Minimal PNG writer: a single IDAT of stored-deflate scanlines. Enough to look at.
+        using var stream = System.IO.File.Create(path);
+        using var writer = new System.IO.BinaryWriter(stream);
+
+        void BE(int v) => writer.Write(new[] { (byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v });
+        void Chunk(string type, byte[] data)
+        {
+            BE(data.Length);
+            var body = System.Text.Encoding.ASCII.GetBytes(type).Concat(data).ToArray();
+            writer.Write(body);
+            BE(unchecked((int)Crc32(body)));
+        }
+
+        writer.Write(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
+        Chunk("IHDR", [.. BeBytes(width), .. BeBytes(height), 8, 6, 0, 0, 0]);
+
+        var raw = new List<byte>((width * 4 + 1) * height);
+        for (var y = 0; y < height; y++)
+        {
+            raw.Add(0);
+            for (var x = 0; x < width; x++)
+            {
+                var i = (y * width + x) * 4;
+                raw.AddRange([bgra[i + 2], bgra[i + 1], bgra[i], bgra[i + 3]]);   // BGRA → RGBA
+            }
+        }
+
+        using var deflated = new System.IO.MemoryStream();
+        using (var zlib = new System.IO.Compression.ZLibStream(deflated, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
+        {
+            zlib.Write(raw.ToArray());
+        }
+
+        Chunk("IDAT", deflated.ToArray());
+        Chunk("IEND", []);
+        Console.WriteLine($"[hoster:paint] wrote {path} ({width}x{height})");
+
+        static byte[] BeBytes(int v) => [(byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v];
+    }
+
+    private int _pngSequence;
+
+    private static uint Crc32(byte[] data)
+    {
+        var crc = 0xFFFFFFFFu;
+        foreach (var b in data)
+        {
+            crc ^= b;
+            for (var i = 0; i < 8; i++)
+            {
+                crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+            }
+        }
+        return crc ^ 0xFFFFFFFFu;
+    }
+
+    /// <summary>The cell's own "Content" presenter — the one its measure collapses when it decides
+    /// there is no room, which is how a cell ends up present and empty.</summary>
+    private static ContentPresenter? FindContentPresenter(DependencyObject root)
+    {
+        var n = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < n; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is ContentPresenter { Name: "Content" } found)
+            {
+                return found;
+            }
+
+            if (FindContentPresenter(child) is { } deeper)
+            {
+                return deeper;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>The scroll viewer that carries the columns sideways.</summary>
+    private ScrollViewer? HorizontalScrollViewer()
+    {
+        ScrollViewer? found = null;
+        void Walk(DependencyObject d)
+        {
+            var n = VisualTreeHelper.GetChildrenCount(d);
+            for (var i = 0; i < n && found is null; i++)
+            {
+                var c = VisualTreeHelper.GetChild(d, i);
+                if (c is ScrollViewer sv && sv.ScrollableWidth > 0)
+                {
+                    found = sv;
+                    return;
+                }
+                Walk(c);
+            }
+        }
+        Walk(_table);
+        return found;
+    }
+
     /// <summary>A mark cell of about the weight the import queue's are: a bordered glyph.</summary>
     private static DataTemplate MarkTemplate() => (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
         """
@@ -173,8 +551,75 @@ public sealed partial class VirtualHosterView : Grid
 
     // ── skeleton + model ──
 
+    /// <summary>
+    /// The real collection's skeleton: one node per artist, one per album under it, and the tracks
+    /// left as virtual leaves the model pages in — the same shape QueueTreeSource builds, so the
+    /// group sizes the model has to cope with are the real ones (one artist owning a thousand
+    /// tracks, eight hundred owning one, a quarter of everything in a single Unknown-album bucket).
+    /// </summary>
+    private void BuildMusicSkeleton()
+    {
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        _music = MusicLibrary.Load(MusicPath!, MusicLimit);
+        _musicLeaves.Clear();
+        _roots = new List<DemoNode>();
+
+        foreach (var (artist, albums) in _music.Artists)
+        {
+            var artistNode = new DemoNode(artist, 0);
+            _roots.Add(artistNode);
+
+            foreach (var (album, tracks) in albums)
+            {
+                var albumNode = new DemoNode(album, 1) { LeafCount = tracks.Length };
+                artistNode.Children.Add(albumNode);
+                _musicLeaves[albumNode] = tracks;
+            }
+        }
+
+        _model = new VirtualTreeModel(
+            childrenOf: n => ((DemoNode)n).Children,
+            leafCountOf: n => n is DemoNode d ? d.LeafCount : 0,
+            fetchLeaves: FetchMusicLeavesAsync,
+            placeholderOf: PlaceholderFor,
+            pageSize: PageSize);
+        _model.SetRoots(_roots);
+        _source = new VirtualTreeItemsSource(_model);
+        _table.ItemsSource = _source;
+
+        Console.WriteLine($"[hoster:music] {_music.TrackCount} tracks, {_roots.Count} artists, "
+            + $"{_music.AlbumCount} albums, loaded in {t0.ElapsedMilliseconds}ms");
+    }
+
+    private readonly Dictionary<DemoNode, MusicTrack[]> _musicLeaves = new();
+
+    private async Task<IReadOnlyList<object>> FetchMusicLeavesAsync(
+        object? group, int offset, int limit, CancellationToken ct)
+    {
+        if (_latencyMs > 0)
+            await Task.Delay(_latencyMs, ct);
+
+        if (group is not DemoNode album || !_musicLeaves.TryGetValue(album, out var tracks))
+            return [];
+
+        var take = Math.Max(0, Math.Min(limit, tracks.Length - offset));
+        var rows = new List<object>(take);
+        for (var i = 0; i < take; i++)
+        {
+            var track = tracks[offset + i];
+            rows.Add(new DemoNode(track.DisplayName, album.Depth + 1) { Track = track });
+        }
+        return rows;
+    }
+
     private void BuildSkeletonAndModel()
     {
+        if (MusicPath is not null)
+        {
+            BuildMusicSkeleton();
+            return;
+        }
+
         _roots = new List<DemoNode>();
         for (var a = 1; a <= Artists; a++)
         {
@@ -454,6 +899,15 @@ public sealed partial class VirtualHosterView : Grid
             return;
         }
 
+        // --paint: are the cells actually SHOWING anything? Every other check here asks whether
+        // the right rows are realized in the right places; none of them looks inside a cell. A
+        // grid whose cells are all present, correctly sized and empty passes all of them.
+        if (Environment.GetCommandLineArgs().Contains("--paint"))
+        {
+            await PaintProbeAsync();
+            return;
+        }
+
         // --fling-loop: hop between two far-apart high offsets forever — a stable hot loop
         // for attaching a CPU profiler to the large-scroll path.
         if (Environment.GetCommandLineArgs().Contains("--fling-loop"))
@@ -701,6 +1155,17 @@ public sealed partial class VirtualHosterView : Grid
         Console.WriteLine($"[hoster:fling] SUMMARY hops={walls.Count} "
             + $"wallMedian={Median(walls)}ms wallP90={P90(walls)}ms "
             + $"rowMeasureMedian={Median(measures)}ms rowMeasureP90={P90(measures)}ms");
+        // Does the scrollbar agree with the content? The extent the panel reports divided by the
+        // number of rows is the height it BELIEVES a row is; the realized rows say what one
+        // actually is. When those disagree the bar is the wrong length, and dragging it to the
+        // bottom stops short of the end — or runs past it.
+        var rowsNow = RealizedRows();
+        var actualRowHeight = rowsNow.Count > 0 ? rowsNow[0].ActualHeight : 0;
+        var count = _source.Count;
+        var believedRowHeight = count > 0 ? sv.ExtentHeight / count : 0;
+        Console.WriteLine($"[hoster:fling] EXTENT rows={count} extent={sv.ExtentHeight:F0} "
+            + $"believedRowHeight={believedRowHeight:F1} actualRowHeight={actualRowHeight:F1} "
+            + $"setRowHeight={_table.RowHeight:F1} overshoot={(actualRowHeight > 0 ? believedRowHeight / actualRowHeight : 0):P0}");
         Console.WriteLine($"[hoster:fling] extent={extent:F0} samples={samples.Count} worstBlank={worstBlank}ms@{blankAt}ms worstUiStall={worstGap}ms@{gapAt}ms");
 
         var ok = worstBlank < 200;

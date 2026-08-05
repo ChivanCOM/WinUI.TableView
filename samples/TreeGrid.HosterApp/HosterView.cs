@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -26,6 +27,62 @@ public sealed partial class DemoNode : ITreeGridRow, INotifyPropertyChanged
     public string Artist { get; }
     public string Title { get; }
     public List<DemoNode> Children { get; } = new();
+
+    // ── real-collection mode (--music) ────────────────────────────────────────────────────────
+    //
+    // The columns below mirror the import queue's, formatted the way it formats them, so the
+    // harness measures the same text the app draws rather than a placeholder of a convenient
+    // length. A group row leaves them empty, exactly as the grid does.
+
+    /// <summary>The tagged file this row stands for; null on an artist or album row.</summary>
+    public MusicTrack? Track { get; init; }
+
+    /// <summary>Checked state for the queue's tick column — a bound CheckBox per realized row.</summary>
+    public bool IsChecked
+    {
+        get;
+        set
+        {
+            if (field == value) return;
+            field = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsChecked)));
+        }
+    } = true;
+
+    public string ColFolder => Track?.Folder ?? "";
+    public string ColTitle => Track?.Title ?? "";
+    public string ColArtist => Track?.Artist ?? "";
+    public string ColAlbum => Track?.Album ?? "";
+    public string ColAlbumArtist => Track?.AlbumArtist ?? "";
+    public string ColTrack => Num(Track?.TrackNumber);
+    public string ColDisc => Num(Track?.DiscNumber);
+    public string ColDiscTitle => "";
+    public string ColYear => Num(Track?.Year);
+    public string ColGenre => Track?.Genre ?? "";
+    public string ColLength => Track is null ? "" : Duration(Track.DurationSeconds);
+    public string ColKind => Track is null ? "" : Path.GetExtension(Track.RelativePath).TrimStart('.').ToUpperInvariant();
+    public string ColCodec => Track?.Codec ?? "";
+    public string ColBitrate => Track is { BitrateKbps: > 0 } t ? $"{t.BitrateKbps} kbps" : "";
+    public string ColSampleRate => Track is { SampleRate: > 0 } t ? $"{t.SampleRate / 1000.0:0.#} kHz" : "";
+    public string ColBitDepth => Track is { BitDepth: > 0 } t ? $"{t.BitDepth}-bit" : "";
+    public string ColChannels => Track?.Channels switch { 1 => "Mono", 2 => "Stereo", > 2 => $"{Track.Channels}ch", _ => "" };
+    public string ColSize => Track is { SizeBytes: > 0 } t ? $"{t.SizeBytes / 1024.0 / 1024.0:0.0} MB" : "";
+    public string ColFile => Track?.FileName ?? "";
+
+    /// <summary>The queue's state mark: complete, or missing something it needs.</summary>
+    public string StateGlyph => Track is null ? "" : HasMinimumMetadata ? "✓" : "?";
+
+    private bool HasMinimumMetadata => Track is { } t
+        && t.Artist.Length > 0 && t.AlbumArtist.Length > 0 && t.Album.Length > 0
+        && t.Title.Length > 0 && t.Genre.Length > 0 && t.TrackNumber > 0 && t.Year > 0;
+
+    private static string Num(int? n) => n is > 0 ? n.Value.ToString() : "";
+
+    private static string Duration(double seconds)
+    {
+        var s = (int)Math.Round(seconds);
+        return s <= 0 ? "" : $"{s / 60}:{s % 60:00}";
+    }
 
     /// <summary>Virtual-leaf count (VirtualHosterView): tracks this group owns that are
     /// paged in on demand rather than materialized as Children.</summary>
