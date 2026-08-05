@@ -1151,10 +1151,6 @@ public partial class TableView : ListView
     // container, which is the direct cause of the "rows stay empty too long" jank. Anything
     // structural in the burst (Reset / insert / remove), or a burst larger than the cap, still
     // forces the full re-point.
-    /// <summary>How many rows the list had at the previous Reset, so the next one can tell a list
-    /// that changed shape from a list that was merely re-read.</summary>
-    private int _lastResetCount;
-
     private bool _unoBurstNeedsRebind;
     private bool _unoShiftReseat;
     private readonly HashSet<int> _unoChangedIndices = new();
@@ -1195,25 +1191,58 @@ public partial class TableView : ListView
         {
             _unoBurstNeedsRebind = true; // Reset: structural beyond repair, re-point
 
-            // And if the list changed size wholesale — a search box being typed into, a filter
-            // applied, ten thousand duplicates removed — the offset goes back to the top NOW,
-            // synchronously, before anything can lay out against it.
+            // The reader's place is remembered and the offset goes to the top NOW, synchronously,
+            // before anything can lay out against it.
             //
             // It cannot wait for the rebind on the dispatcher. A layout pass in between finds the
-            // panel still parked at an offset deep inside a list that has just shrunk, and Uno's
-            // layouter fills line by line from its seed towards that position, realizing a whole
-            // row of cells for every line on the way. That is the interface freezing solid on a
+            // panel parked at an offset belonging to the list that has just been replaced, and
+            // Uno's layouter fills line by line from its seed towards that position, measuring a
+            // whole row of cells for every line on the way — from the top of a twenty-thousand-row
+            // list to half a million pixels down it. That is the interface freezing solid on a
             // keystroke, and the further down the list the search box was reached for, the longer
-            // it freezes. The reader's place was destroyed by the change, not moved by it; the top
-            // is the honest answer and the only cheap one.
+            // it freezes.
+            //
+            // Whether the place is worth remembering depends on what kind of Reset this is, and
+            // the size of the list answers that. A rebuild that changed nothing about WHICH rows
+            // there are — the skeleton rebuilt after a metadata edit, a re-sort, a page landing —
+            // is the same list, and the reader is put back where they were. A search box typed
+            // into, a filter applied, ten thousand duplicates removed: the reader's place was not
+            // moved by that, it was destroyed by it, and the top is the honest answer.
+            //
+            // Restoring a place in a list that changed wholesale is not merely wrong, it is a
+            // hang: the row somebody was looking at can still exist and still be thousands of
+            // rows from where it was, so aiming at it lands the panel in the same line-by-line
+            // fill this clamp exists to prevent.
             var count = Items?.Count ?? 0;
-            if (_lastResetCount > 0 && Math.Abs(count - _lastResetCount) * 10 > _lastResetCount
-                && _scrollViewer is { VerticalOffset: > 0 } sv)
-            {
-                sv.ChangeView(null, 0, null, disableAnimation: true);
-            }
+            var sameList = _unoKnownCount > 0 && Math.Abs(count - _unoKnownCount) * 10 <= _unoKnownCount;
 
-            _lastResetCount = count;
+            if (sameList)
+            {
+                CaptureReanchorState();
+            }
+            else
+            {
+                _unoReanchorOffset = _scrollViewer?.VerticalOffset ?? 0;
+                _unoReanchorCandidates.Clear();
+            }
+            _unoReanchorCaptured = true;
+            _unoKnownCount = count;
+
+            if (_unoReanchorOffset > 0 && _scrollViewer is { } sv)
+            {
+                if (ReanchorTrace)
+                {
+                    Console.WriteLine($"[reset] clamping from offset={_unoReanchorOffset:F0} "
+                        + $"count={count} sameList={sameList}");
+                }
+
+                sv.ChangeView(null, 0, null, disableAnimation: true);
+
+                if (!sameList)
+                {
+                    _unoReanchorOffset = 0;   // nothing to go back to
+                }
+            }
         }
 
         if (_unoRefreshQueued)
@@ -1257,29 +1286,30 @@ public partial class TableView : ListView
     // keeps its old offset: every container lands above the viewport and the grid looks empty
     // (the "disappearing rows" / blank band after a collapse while scrolled down). The panel
     // only re-anchors to the offset on a VIEW CHANGE, and its rebuild finishes asynchronously
-    // whole seconds after the re-point — nudges fired in the first few hundred ms provably get
-    // wiped, while a double-nudge (offset−1, then offset a beat later; two DISTINCT offsets,
-    // same-offset ChangeView is a no-op) once things settle provably re-anchors. So repeat
-    // that double-nudge on a paced schedule across ~5s, driven by awaited UI-thread delays
-    // (a DispatcherTimer proved unreliable here), cancelled by the next rebind's generation
-    // bump or by the user scrolling away.
+    // well after the re-point — so the position is aimed at again from the container prepares
+    // the rebuild produces (see TryUnoReanchorRestore), not once and hopefully.
+    //
+    /// <summary>Where the reader was before the Reset clamped the offset to the top. Zero once
+    /// there is nothing left to aim at.</summary>
     private double _unoReanchorOffset;
-    private int _unoReanchorGeneration;
 
     private static readonly bool ReanchorTrace = Environment.GetEnvironmentVariable("TREEGRID_TRACE") == "1";
 
-    private void RebindBaseItemsSource()
+    /// <summary>Remembers where the reader was: the offset, and the items the viewport was showing
+    /// (top-down). Whichever of those items still resolves to an index after the re-point anchors
+    /// the viewport again — a rebuilt tree hands back all-new objects, so the item's own identity
+    /// is no help and the source is asked to place it (see <see cref="ResolveAnchorIndex"/>).
+    /// Taken at the Reset, before the offset is clamped, because by rebind time it is gone.</summary>
+    private void CaptureReanchorState()
     {
         _unoReanchorOffset = _scrollViewer?.VerticalOffset ?? 0;
-        _unoReanchorCountBefore = Items?.Count ?? 0;
 
-        // Capture the visible rows' items (top-down) BEFORE the re-point: whichever of them
-        // still resolves to an index afterwards anchors the viewport again. Skip contents
-        // whose IndexOf disagrees with the row (shared placeholders resolve to a duplicate).
         _unoReanchorCandidates.Clear();
-        if (_unoReanchorOffset > 0 && _scrollViewer is { } svA)
+        if (_unoReanchorOffset > 0 && _scrollViewer is { } svA && ItemsPanelRoot is { } panel)
         {
-            foreach (var row in _rows
+            // The PANEL's children, not _rows: the layouter's large-scroll recovery recycles
+            // containers without re-preparing them, and _rows only tracks what has been prepared.
+            foreach (var row in panel.Children.OfType<TableViewRow>()
                 .Where(r => r.ActualHeight > 0 && r.Content is not null)
                 .Select(r => { try { return (Row: r, Y: r.TransformToVisual(svA).TransformPoint(new Point(0, 0)).Y); } catch (ArgumentException) { return (Row: r, Y: double.NaN); } })
                 .Where(t => !double.IsNaN(t.Y) && t.Y > -t.Row.ActualHeight && t.Y < svA.ViewportHeight)
@@ -1288,6 +1318,30 @@ public partial class TableView : ListView
                 _unoReanchorCandidates.Add(row.Row.Content);
             }
         }
+
+        if (ReanchorTrace)
+        {
+            Console.WriteLine($"[capture] offset={_unoReanchorOffset:F0} "
+                + $"candidates={_unoReanchorCandidates.Count}");
+        }
+    }
+
+    /// <summary>Set when the Reset already captured the reader's place — the rebind that follows
+    /// must not capture again, because the offset it would read is the clamped zero.</summary>
+    private bool _unoReanchorCaptured;
+
+    /// <summary>How many rows the grid was showing before this Reset. Read at the Reset, when
+    /// <see cref="Items"/> already reports the NEW list, so the two cannot be compared there;
+    /// this is the last count the grid actually bound to.</summary>
+    private int _unoKnownCount;
+
+    private void RebindBaseItemsSource()
+    {
+        if (!_unoReanchorCaptured)
+        {
+            CaptureReanchorState();
+        }
+        _unoReanchorCaptured = false;
 
         _allowInternalBaseItemsSourceSet = true;
         try
@@ -1301,20 +1355,19 @@ public partial class TableView : ListView
         }
 
         if (ReanchorTrace)
-                Console.WriteLine($"[reanchor] rebind offset={_unoReanchorOffset:F0} sv={(_scrollViewer is not null)}");
+                Console.WriteLine($"[reanchor] rebind offset={_unoReanchorOffset:F0} sv={(_scrollViewer is not null)} "
+                    + $"candidates={_unoReanchorCandidates.Count} anchor={ResolveVisibleAnchorIndex()}");
 
-        if (_unoReanchorOffset > 0 && _scrollViewer is { } sv)
+        if (_unoReanchorOffset > 0 && _scrollViewer is not null)
         {
-            // A list that changed wholesale — a search box being typed into, a filter applied, ten
-            // thousand duplicates removed — did not move the reader's place, it destroyed it. Going
-            // back to the top is the honest answer, and it is the only cheap one: leaving the offset
-            // deep in a list that just shrank leaves the panel filling line by line from its seed
-            // towards a position that no longer means anything, realizing a whole row of cells for
-            // each line on the way. That is the interface freezing solid on a keystroke, and the
-            // further down the list the search box was reached for, the longer it freezes.
-            if (!AnchorRowIsMeaningful())
+            // Only a row that the new list can still place is worth aiming at. An edit, a re-sort,
+            // a page landing: the rows the viewport was showing are all still there, and the
+            // position is restored to them. A search box typed into, a filter applied, ten
+            // thousand duplicates removed: not one of them is, and the reader's place was not
+            // moved by the change but destroyed by it — the top, where the offset already sits,
+            // is the honest answer and the cheap one.
+            if (ResolveVisibleAnchorIndex() < 0)
             {
-                sv.ChangeView(null, 0, null, disableAnimation: true);
                 _unoReanchorOffset = 0;
                 _unoReanchorCandidates.Clear();
                 return;
@@ -1328,30 +1381,19 @@ public partial class TableView : ListView
     private bool _unoReanchorPending;
     private int _unoReanchorPrepares;
 
-    /// <summary>How many rows there were before the re-point. A rebind that changed the row count
-    /// wholesale did not move the reader's place — it destroyed it.</summary>
-    private int _unoReanchorCountBefore;
-
-    /// <summary>
-    /// Whether a row-derived anchor is worth aiming at.
-    ///
-    /// <para>Re-anchoring restores a POSITION. That is meaningful when the list is substantially the
-    /// same list — an edit, a re-sort, a page landing — and meaningless when it is not: delete ten
-    /// thousand of twenty thousand rows and the row somebody was looking at is either gone or has
-    /// moved half the list, so aiming at it means a long scroll to somewhere they never asked to be.
-    /// Worse, the restore loop retries until the offset lands within a couple of pixels of the
-    /// target, so an unreachable one costs hundreds of layout passes — which is a hang.</para>
-    ///
-    /// <para>Below the threshold the old offset is restored instead, clamped by the ScrollViewer,
-    /// which is both instant and the honest answer to "that place no longer exists".</para>
-    /// </summary>
-    private bool AnchorRowIsMeaningful()
+    /// <summary>Where the topmost row the viewport was showing lives in the list now, or -1 when
+    /// the new list can place none of them.</summary>
+    private int ResolveVisibleAnchorIndex()
     {
-        var before = _unoReanchorCountBefore;
-        var now = Items?.Count ?? 0;
-        if (before == 0)
-            return false;
-        return Math.Abs(now - before) * 10 <= before;   // within 10% of the list it was
+        foreach (var item in _unoReanchorCandidates)
+        {
+            var index = ResolveAnchorIndex(item);
+            if (index >= 0)
+            {
+                return index;
+            }
+        }
+        return -1;
     }
 
     /// <summary>Restores the scroll position after a rebind, driven by container prepares —
@@ -1419,29 +1461,15 @@ public partial class TableView : ListView
             return;
         }
 
-        var meaningful = AnchorRowIsMeaningful();
-        var anchorIndex = -1;
-        if (meaningful)
-        {
-            foreach (var item in _unoReanchorCandidates)
-            {
-                anchorIndex = ResolveAnchorIndex(item);
-                if (anchorIndex >= 0) break;
-            }
-        }
+        var anchorIndex = ResolveVisibleAnchorIndex();
 
-        // A list that changed wholesale — a search box being typed into, a filter applied, ten
-        // thousand duplicates removed — did not move the reader's place. It destroyed it. There is
-        // nothing left to restore, so whatever the ScrollViewer has already clamped the offset to
-        // is the honest answer, and this is finished.
-        //
-        // What it did instead was aim at the offset from the PREVIOUS list and keep aiming: every
-        // ChangeView triggers prepares, every prepare comes back here, and the target is never
-        // reached because the extent is still growing underneath it — so it ran to the
-        // four-hundred-round cap, each round realizing a whole viewport of cells. That is the
-        // interface freezing solid on every keystroke of a search, and the further down the list
-        // the search box was reached for, the longer it freezes.
-        if (!meaningful)
+        // Nothing the viewport was showing survives in this list, so there is no place to restore
+        // and whatever the offset already sits at is the honest answer. What this used to do
+        // instead was aim at the offset from the PREVIOUS list and keep aiming: every ChangeView
+        // triggers prepares, every prepare comes back here, and the target is never reached
+        // because the extent is still growing underneath it — so it ran to the four-hundred-round
+        // cap, each round realizing a whole viewport of cells.
+        if (anchorIndex < 0)
         {
             _unoReanchorPending = false;
             _unoReanchorCandidates.Clear();
@@ -1453,9 +1481,7 @@ public partial class TableView : ListView
         var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
         // Mixed row heights (RowHeightSelector) make index × pitch wrong by the accumulated
         // difference above the anchor — the host's offset function is exact where provided.
-        var target = anchorIndex >= 0
-            ? RowOffsetOfIndex?.Invoke(anchorIndex) ?? anchorIndex * pitch
-            : _unoReanchorOffset;
+        var target = RowOffsetOfIndex?.Invoke(anchorIndex) ?? anchorIndex * pitch;
         target = Math.Min(target, Math.Max(0, sv.ScrollableHeight));
 
         if (ReanchorTrace)
@@ -1487,87 +1513,6 @@ public partial class TableView : ListView
 
         sv.ChangeView(null, target, null, disableAnimation: true);
     }
-
-    private void InvokeLayouterMethod(string name)
-    {
-        try
-        {
-            var layouter = GetLayouterViaReflection();
-            layouter?.GetType().GetMethod(name,
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
-                ?.Invoke(layouter, null);
-            if (ReanchorTrace)
-                Console.WriteLine($"[reanchor] layouter {name} invoked");
-        }
-        catch (Exception ex)
-        {
-            if (ReanchorTrace)
-                Console.WriteLine($"[reanchor] layouter {name} failed: {ex.Message}");
-        }
-    }
-
-    private object? GetLayouterViaReflection()
-    {
-        if (ItemsPanelRoot is not { } panel)
-        {
-            return null;
-        }
-        var get = panel.GetType().GetMethod("Microsoft.UI.Xaml.Controls.IVirtualizingPanel.GetLayouter",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-            ?? panel.GetType().GetMethod("GetLayouter",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-        return get?.Invoke(panel, null);
-    }
-
-    private bool RestoreAnchorViaLayouter()
-    {
-        var anchorIndex = -1;
-        if (AnchorRowIsMeaningful())
-        {
-            foreach (var item in _unoReanchorCandidates)
-            {
-                anchorIndex = ResolveAnchorIndex(item);
-                if (anchorIndex >= 0) break;
-            }
-        }
-
-        try
-        {
-            var layouter = GetLayouterViaReflection();
-
-            var core = layouter?.GetType().GetMethod("ScrollIntoViewCore",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-
-            if (ReanchorTrace)
-                Console.WriteLine($"[reanchor] layouter={layouter?.GetType().Name} core={core is not null} anchorIndex={anchorIndex}");
-
-            if (core is not null && anchorIndex >= 0 && _scrollViewer is { } svc)
-            {
-                core.Invoke(layouter, new object[] { anchorIndex, ScrollIntoViewAlignment.Leading });
-
-                // Anchored when the offset now sits within a viewport of where the anchor
-                // row belongs (pitch estimated from a live container; the host's offset
-                // function is exact under mixed row heights).
-                var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
-                var expected = RowOffsetOfIndex?.Invoke(anchorIndex) ?? anchorIndex * pitch;
-                var ok = Math.Abs(svc.VerticalOffset - expected) < pitch * 4;
-                if (ReanchorTrace)
-                    Console.WriteLine($"[reanchor] after core: offset={svc.VerticalOffset:F0} expected~{expected:F0} ok={ok}");
-                return ok;
-            }
-        }
-        catch (Exception ex)
-        {
-            if (ReanchorTrace)
-                Console.WriteLine($"[reanchor] layouter anchor failed: {ex.Message}");
-        }
-
-        // Fallback: plain offset restore.
-        _scrollViewer?.ChangeView(null, Math.Min(_unoReanchorOffset, Math.Max(0, _scrollViewer.ScrollableHeight)), null, disableAnimation: true);
-        return false;
-    }
-
-
 
     // FIX B: refresh only the realized rows whose item object was replaced. Unrealized indices
     // need nothing — Uno's ListView reads the item through the IList indexer when it realizes a
@@ -1635,6 +1580,9 @@ public partial class TableView : ListView
             _allowInternalBaseItemsSourceSet = false;
         }
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
+#if !WINDOWS
+        _unoKnownCount = _collectionView.Count;
+#endif
     }
 
 

@@ -28,6 +28,19 @@ public sealed partial class DemoNode : ITreeGridRow, INotifyPropertyChanged
     public string Title { get; }
     public List<DemoNode> Children { get; } = new();
 
+    /// <summary>The group this row hangs under — an album for a track, an artist for an album.
+    /// A rebuilt skeleton is all-new objects, so a row is placed again by its group and its
+    /// offset within it, not by its identity (see the model's <c>anchorOf</c>).</summary>
+    public DemoNode? Parent { get; set; }
+
+    /// <summary>Which artist and album this row belongs to, as the store groups them. Null on a
+    /// row that is not part of the grouped collection.</summary>
+    public string? GroupArtist { get; init; }
+    public string? GroupAlbum { get; init; }
+
+    /// <summary>Where this track sits inside its album's page run.</summary>
+    public int LeafOffset { get; init; }
+
     // ── real-collection mode (--music) ────────────────────────────────────────────────────────
     //
     // The columns below mirror the import queue's, formatted the way it formats them, so the

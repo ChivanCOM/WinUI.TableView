@@ -64,8 +64,13 @@ public sealed class VirtualTreeItemsSource : ITableViewItemsSource, IList
     {
         if (Trace) Console.WriteLine("[vtis] Reset");
         RaisePropertyChanged(nameof(Count));
-        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+
+        // VectorChanged FIRST. The list framework acts on CollectionChanged synchronously, and
+        // what it does on a Reset is drop every container in the grid — so a grid told second
+        // is told about a viewport that no longer exists, and cannot see where the reader was
+        // in order to put them back there afterwards.
         VectorChanged?.Invoke(this, new VectorChangedEventArgs(CollectionChange.Reset));
+        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }
 
     private void OnModelRangeInserted(int index, int count)

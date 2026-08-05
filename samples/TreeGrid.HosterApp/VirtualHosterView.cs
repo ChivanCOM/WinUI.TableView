@@ -26,6 +26,10 @@ public sealed partial class VirtualHosterView : Grid
     private const int PageSize = 50;
     private const double RowHeight = 30;
 
+    /// <summary>What a realized row actually occupies, borders included — the pitch the offset
+    /// maths goes by (see <see cref="FirstVisibleGroupIndex"/>).</summary>
+    private const double RowPitch = 41;
+
     private readonly TableView _table;
     private readonly TextBlock _status;
     private ScrollViewer? _scrollViewer;
@@ -442,6 +446,78 @@ public sealed partial class VirtualHosterView : Grid
         Finish(ok);
     }
 
+    /// <summary>
+    /// A rebuild that changes nothing about what the list holds — the shape of a metadata edit,
+    /// which rebuilds the skeleton from the store and so hands back all-new objects for the same
+    /// rows — must leave the reader where they were.
+    ///
+    /// <para>The Reset sends the offset to the top, because a layout pass against an offset
+    /// belonging to the list that was just replaced is what freezes the interface on a keystroke.
+    /// The place is remembered across that, and restored from the rows the viewport was showing.
+    /// This is the check that it comes back.</para>
+    /// </summary>
+    private async Task ReanchorProbeAsync()
+    {
+        if (_music is null)
+        {
+            Console.WriteLine("[hoster:reanchor] needs --music");
+            Finish(false);
+            return;
+        }
+
+        await SettleAsync();
+        _scrollViewer ??= FindScrollViewer(_table);
+        if (_scrollViewer is not { } sv)
+        {
+            Console.WriteLine("[hoster:reanchor] no ScrollViewer");
+            Finish(false);
+            return;
+        }
+
+        // A hundred rows down, not half a collection down: the reader scrolled to something and
+        // is looking at it. (A deep jump lands on a viewport that has not been realized yet —
+        // there is nothing on screen to anchor to, and what that costs is what --fling measures.)
+        sv.ChangeView(null, Math.Min(RowPitch * 100, Math.Max(0, sv.ExtentHeight - sv.ViewportHeight)), null, true);
+        await Task.Delay(200);
+        await SettleAsync();
+
+        var before = sv.VerticalOffset;
+        var topBefore = TopVisibleName();
+        Console.WriteLine($"[hoster:reanchor] parked at {before:F0} with {RealizedRows().Count} rows realized");
+
+        _model.SetRoots(FilteredRoots(""));   // the same rows, as new objects
+
+        // The restore is driven by container prepares after the re-point, so it lands over the
+        // next few frames rather than in this one.
+        for (var i = 0; i < 25 && Math.Abs(sv.VerticalOffset - before) > RowPitch * 2; i++)
+        {
+            await Task.Delay(100);
+        }
+        await SettleAsync();
+
+        var after = sv.VerticalOffset;
+        var drift = Math.Abs(after - before);
+        var ok = drift <= RowPitch * 2;
+
+        Console.WriteLine($"[hoster:reanchor] before={before:F0} after={after:F0} drift={drift:F0} "
+            + $"top=\"{topBefore}\" -> \"{TopVisibleName()}\"");
+        Console.WriteLine(ok
+            ? "[hoster:reanchor] PASS — the rebuild kept the reader's place"
+            : $"[hoster:reanchor] FAIL — the rebuild moved the reader {drift:F0}px");
+        Finish(ok);
+    }
+
+    /// <summary>The name of the row at the top of the viewport, or null where a page has not
+    /// landed yet.</summary>
+    private string? TopVisibleName()
+    {
+        _scrollViewer ??= FindScrollViewer(_table);
+        var index = _scrollViewer is { } sv ? (int)(sv.VerticalOffset / RowPitch) : 0;
+        return index >= 0 && index < _model.Count && _model.PeekAt(index) is DemoNode node
+            ? node.Name
+            : null;
+    }
+
     private List<DemoNode> _rootsAll = new();
 
     /// <summary>The skeleton for a search term: artists and albums that still hold a matching track,
@@ -463,8 +539,14 @@ public sealed partial class VirtualHosterView : Grid
                     continue;
                 }
 
-                artistNode ??= new DemoNode(artist, 0);
-                var albumNode = new DemoNode(album, 1) { LeafCount = hits.Length };
+                artistNode ??= new DemoNode(artist, 0) { GroupArtist = artist };
+                var albumNode = new DemoNode(album, 1)
+                {
+                    LeafCount = hits.Length,
+                    GroupArtist = artist,
+                    GroupAlbum = album,
+                    Parent = artistNode,
+                };
                 artistNode.Children.Add(albumNode);
                 _musicLeaves[albumNode] = hits;
             }
@@ -687,22 +769,38 @@ public sealed partial class VirtualHosterView : Grid
 
         foreach (var (artist, albums) in _music.Artists)
         {
-            var artistNode = new DemoNode(artist, 0);
+            var artistNode = new DemoNode(artist, 0) { GroupArtist = artist };
             _roots.Add(artistNode);
 
             foreach (var (album, tracks) in albums)
             {
-                var albumNode = new DemoNode(album, 1) { LeafCount = tracks.Length };
+                var albumNode = new DemoNode(album, 1)
+                {
+                    LeafCount = tracks.Length,
+                    GroupArtist = artist,
+                    GroupAlbum = album,
+                    Parent = artistNode,
+                };
                 artistNode.Children.Add(albumNode);
                 _musicLeaves[albumNode] = tracks;
             }
         }
 
+        // groupKeyOf / anchorOf are what let the grid answer "where is the row I was looking at"
+        // after the skeleton is rebuilt — the queue source wires them the same way, and without
+        // them a rebuild has nothing to re-anchor to and starts again at the top.
         _model = new VirtualTreeModel(
             childrenOf: n => ((DemoNode)n).Children,
             leafCountOf: n => n is DemoNode d ? d.LeafCount : 0,
             fetchLeaves: FetchMusicLeavesAsync,
             placeholderOf: PlaceholderFor,
+            groupKeyOf: n => n is DemoNode { Track: null, GroupArtist: not null } g
+                ? GroupKeyOf(g)
+                : null,
+            anchorOf: n => n is DemoNode { Track: not null, LeafOffset: var offset,
+                                           Parent: { GroupAlbum: not null } album }
+                ? (GroupKeyOf(album), offset)
+                : null,
             pageSize: PageSize);
         _model.SetRoots(_roots);
         _rootsAll = _roots;
@@ -712,6 +810,14 @@ public sealed partial class VirtualHosterView : Grid
         Console.WriteLine($"[hoster:music] {_music.TrackCount} tracks, {_roots.Count} artists, "
             + $"{_music.AlbumCount} albums, loaded in {t0.ElapsedMilliseconds}ms");
     }
+
+    // A group's identity across rebuilds, keyed the way the store groups: the LEVEL in front, so
+    // an artist and its own unknown-album child cannot key the same, and a unit separator between
+    // the parts, so an artist called "X/Y" cannot collide with an album.
+    private static string GroupKeyOf(DemoNode group)
+        => group.GroupAlbum is { } album
+            ? "b\u001f" + group.GroupArtist + "\u001f" + album
+            : "a\u001f" + group.GroupArtist;
 
     private readonly Dictionary<DemoNode, MusicTrack[]> _musicLeaves = new();
 
@@ -729,7 +835,12 @@ public sealed partial class VirtualHosterView : Grid
         for (var i = 0; i < take; i++)
         {
             var track = tracks[offset + i];
-            rows.Add(new DemoNode(track.DisplayName, album.Depth + 1) { Track = track });
+            rows.Add(new DemoNode(track.DisplayName, album.Depth + 1)
+            {
+                Track = track,
+                Parent = album,
+                LeafOffset = offset + i,
+            });
         }
         return rows;
     }
@@ -1027,6 +1138,14 @@ public sealed partial class VirtualHosterView : Grid
         if (Environment.GetCommandLineArgs().Contains("--filter"))
         {
             await FilterProbeAsync();
+            return;
+        }
+
+        // --reanchor: a rebuild that changes nothing about what the list holds — a metadata edit —
+        // must leave the reader where they were, across the offset clamp the Reset does.
+        if (Environment.GetCommandLineArgs().Contains("--reanchor"))
+        {
+            await ReanchorProbeAsync();
             return;
         }
 
