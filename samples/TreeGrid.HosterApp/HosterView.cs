@@ -83,7 +83,7 @@ public sealed partial class DemoNode : ITreeGridRow, INotifyPropertyChanged
     public string ColFile => Track?.FileName ?? "";
 
     /// <summary>The queue's state mark: complete, or missing something it needs.</summary>
-    public string StateGlyph => Track is null ? "" : HasMinimumMetadata ? "✓" : "?";
+    public string StateGlyph => Track is null ? "" : HasMinimumMetadata ? "" : "";
 
     private bool HasMinimumMetadata => Track is { } t
         && t.Artist.Length > 0 && t.AlbumArtist.Length > 0 && t.Album.Length > 0
@@ -102,7 +102,25 @@ public sealed partial class DemoNode : ITreeGridRow, INotifyPropertyChanged
     public int LeafCount { get; set; }
 
     public bool HasChildren => Children.Count > 0 || LeafCount > 0;
-    public string Glyph => HasChildren ? "📁" : "🎵";
+    public string Glyph => HasChildren ? "\uf07b" : "\uf001";   // folder / music, in the icon font
+
+    // The marks the queue wears, in the shapes it wears them: a state glyph saying what the file
+    // is, a duplicate badge saying whether the library already holds it, and a colour for each.
+    // Every one of them is a binding read on every row realized, and a brush the row has to apply.
+    private static readonly SolidColorBrush Plain = new(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF));
+    private static readonly SolidColorBrush Warn = new(Color.FromArgb(0xFF, 0xFF, 0xC1, 0x07));
+    private static readonly SolidColorBrush Dupe = new(Color.FromArgb(0xFF, 0xFF, 0x6B, 0x6B));
+
+    /// <summary>Stands in for "the library already holds this": every eleventh file, which is the
+    /// order of magnitude a re-import of an existing folder produces.</summary>
+    public bool LooksDuplicate => Track is not null && Track.SizeBytes % 11 == 0;
+
+    public Brush StateBrush => Track is not null && !HasMinimumMetadata ? Warn : Plain;
+    public string StateTip => Track is null ? "" : HasMinimumMetadata ? "Complete" : "Missing metadata";
+
+    public string DuplicateGlyph => LooksDuplicate ? "\uf0c5" : "";
+    public Brush DuplicateBrush => LooksDuplicate ? Dupe : Plain;
+    public string DuplicateTip => LooksDuplicate ? "Already in the library" : "";
 
     public bool IsExpanded
     {

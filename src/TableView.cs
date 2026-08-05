@@ -181,10 +181,81 @@ public partial class TableView : ListView
     public static long DiagRowArrangeTicks;
     public static long DiagRowArranges;
     public static long DiagGoToStates;
+    public static long DiagGoToStateTicks;
     public static long DiagCellListBuilds;
     public static long DiagRowIndexLookups;
     public static long DiagAlternateSweeps;
     public static long DiagInsertCellScans;
+
+    /// <summary>
+    /// Watches for frames that never came. A timer ticking every few milliseconds cannot tick while
+    /// the thread is blocked, so a late tick measures the block exactly — and the counters above say
+    /// what the thread was doing while it held on.
+    ///
+    /// <para>Off unless <c>TABLEVIEW_STALL_MS</c> is set, which is also the threshold: a stall
+    /// shorter than that is not worth a line. This is the instrument for a stall in a REAL app,
+    /// where the work a row does is the app's own and no harness can stand in for it.</para>
+    /// </summary>
+    private static readonly int StallThresholdMs =
+        int.TryParse(Environment.GetEnvironmentVariable("TABLEVIEW_STALL_MS"), out var ms) ? ms : 0;
+
+    private static Microsoft.UI.Dispatching.DispatcherQueueTimer? _stallTimer;
+    private static long _stallLastTick;
+    private static long _stallPrepares, _stallPrepareTicks, _stallPostTicks, _stallMeasureTicks,
+                        _stallCellTicks, _stallCells, _stallArrangeTicks, _stallArranges,
+                        _stallLists, _stallRowIdx;
+
+    private void StartStallWatch()
+    {
+        if (StallThresholdMs <= 0 || _stallTimer is not null || DispatcherQueue is null)
+        {
+            return;
+        }
+
+        _stallLastTick = Stopwatch.GetTimestamp();
+        Snapshot();
+
+        _stallTimer = DispatcherQueue.CreateTimer();
+        _stallTimer.Interval = TimeSpan.FromMilliseconds(8);
+        _stallTimer.IsRepeating = true;
+        _stallTimer.Tick += (_, _) =>
+        {
+            var now = Stopwatch.GetTimestamp();
+            var elapsedMs = (now - _stallLastTick) * 1000 / Stopwatch.Frequency;
+            _stallLastTick = now;
+
+            if (elapsedMs >= StallThresholdMs)
+            {
+                static long Ms(long ticks) => ticks * 1000 / Stopwatch.Frequency;
+                Console.WriteLine($"[stall] {elapsedMs}ms "
+                    + $"prepares={DiagPrepares - _stallPrepares} prepMs={Ms(DiagPrepareTicks - _stallPrepareTicks)} "
+                    + $"postPrepMs={Ms(DiagPostPrepareTicks - _stallPostTicks)} "
+                    + $"rowMeasureMs={Ms(DiagRowMeasureTicks - _stallMeasureTicks)} "
+                    + $"cells={DiagCellMeasures - _stallCells} cellMs={Ms(DiagCellMeasureTicks - _stallCellTicks)} "
+                    + $"arranges={DiagRowArranges - _stallArranges} arrangeMs={Ms(DiagRowArrangeTicks - _stallArrangeTicks)} "
+                    + $"cellLists={DiagCellListBuilds - _stallLists} rowIdx={DiagRowIndexLookups - _stallRowIdx}");
+            }
+
+            Snapshot();
+        };
+        _stallTimer.Start();
+
+        Console.WriteLine($"[stall] watching, reporting frames longer than {StallThresholdMs}ms");
+
+        static void Snapshot()
+        {
+            _stallPrepares = DiagPrepares;
+            _stallPrepareTicks = DiagPrepareTicks;
+            _stallPostTicks = DiagPostPrepareTicks;
+            _stallMeasureTicks = DiagRowMeasureTicks;
+            _stallCellTicks = DiagCellMeasureTicks;
+            _stallCells = DiagCellMeasures;
+            _stallArrangeTicks = DiagRowArrangeTicks;
+            _stallArranges = DiagRowArranges;
+            _stallLists = DiagCellListBuilds;
+            _stallRowIdx = DiagRowIndexLookups;
+        }
+    }
 
     /// <summary>
     /// Bumped whenever items can have changed position, which is the only thing that can make a
@@ -640,6 +711,7 @@ public partial class TableView : ListView
 
         ResumeItemsSource();
         EnsureAutoColumns();
+        StartStallWatch();
     }
 
     /// <summary>

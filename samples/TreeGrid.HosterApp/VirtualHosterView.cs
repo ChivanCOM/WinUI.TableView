@@ -30,6 +30,9 @@ public sealed partial class VirtualHosterView : Grid
     /// maths goes by (see <see cref="FirstVisibleGroupIndex"/>).</summary>
     private const double RowPitch = 41;
 
+    /// <summary>The import queue's row height, which is what <c>--music</c> mode measures against.</summary>
+    private const double QueueRowHeight = 22;
+
     private readonly TableView _table;
     private readonly TextBlock _status;
     private ScrollViewer? _scrollViewer;
@@ -87,6 +90,12 @@ public sealed partial class VirtualHosterView : Grid
         };
         if (MusicPath is not null)
         {
+            // The queue's own row height. It is not decoration: at 22px a viewport holds half
+            // again as many rows as at 30, and every one of them is twenty-two cells to realize.
+            _table.RowHeight = QueueRowHeight;
+            _table.RowMinHeight = QueueRowHeight;
+            _table.RowMaxHeight = QueueRowHeight;
+            _table.FontSize = 12;
             AddQueueColumns();
         }
         else
@@ -204,24 +213,68 @@ public sealed partial class VirtualHosterView : Grid
                 """),
         });
 
-        // The state mark and the duplicate badge.
-        for (var i = 0; i < 2; i++)
+        // The details button, as the queue has it: a Button per row, which carries a whole control
+        // template and its visual states, not a glyph in a Border.
+        _table.Columns.Add(new TableViewTemplateColumn
         {
-            _table.Columns.Add(new TableViewTemplateColumn
-            {
-                Header = "",
-                Width = new GridLength(26),
-                CellTemplate = MarkTemplate(),
-            });
-        }
+            Header = "",
+            Width = new GridLength(26),
+            CellTemplate = (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
+                """
+                <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+                  <Button Background="Transparent" BorderThickness="0" Padding="2" MinWidth="0" MinHeight="0"
+                          HorizontalAlignment="Center" VerticalAlignment="Center"
+                          ToolTipService.ToolTip="Details">
+                    <TextBlock Text="&#xf044;" FontSize="10" Foreground="#CCFFFFFF"
+                               FontFamily="ms-appx:///Assets/Fonts/fa-solid-900.ttf#Font Awesome 5 Pro Solid"/>
+                  </Button>
+                </DataTemplate>
+                """),
+        });
+
+        // The duplicate badge: its own glyph, its own colour, its own tooltip — the mark that says
+        // the library already holds this track, which a re-imported folder wears on many rows.
+        _table.Columns.Add(new TableViewTemplateColumn
+        {
+            Header = "",
+            Width = new GridLength(26),
+            CellTemplate = (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
+                """
+                <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+                  <TextBlock Text="{Binding DuplicateGlyph}" FontSize="10.5"
+                             Foreground="{Binding DuplicateBrush}"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                             ToolTipService.ToolTip="{Binding DuplicateTip}"
+                             FontFamily="ms-appx:///Assets/Fonts/fa-solid-900.ttf#Font Awesome 5 Pro Solid"/>
+                </DataTemplate>
+                """),
+        });
 
         _table.Columns.Add(new TableViewTreeColumn
         {
             Header = "Name",
             Width = new GridLength(260),
             Binding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.Name)) },
-            GlyphBinding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.Glyph)) },
+            // The state mark rides in the tree column's glyph slot, as the queue has it: the glyph,
+            // its colour and its tooltip are three bindings read on every row realized.
+            GlyphBinding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.StateGlyph)) },
+            GlyphForegroundBinding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.StateBrush)) },
+            GlyphToolTipBinding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.StateTip)) },
+            GlyphFontFamily = new FontFamily("ms-appx:///Assets/Fonts/fa-solid-900.ttf#Font Awesome 5 Pro Solid"),
+            // The playing row swaps its glyph for a template, and the binding that decides it is
+            // read on every realized row whether one is playing or not.
+            GlyphOverrideBinding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.IsChecked)) },
+            GlyphOverrideTemplate = (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
+                """
+                <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+                  <TextBlock Text="&#x25B6;" FontSize="9" VerticalAlignment="Center"/>
+                </DataTemplate>
+                """),
         });
+
+        // --maxcolumns N: keep only the first N of the queue's columns. A pane shows six of the
+        // twenty-two, and this is how the cost of realizing the sixteen nobody can see is measured.
+        var maxColumns = int.TryParse(ReadArg("--maxcolumns"), out var mc) ? mc : int.MaxValue;
 
         foreach (var (header, width, path) in new (string, int, string)[]
         {
@@ -246,6 +299,11 @@ public sealed partial class VirtualHosterView : Grid
             ("File", 200, nameof(DemoNode.ColFile)),
         })
         {
+            if (_table.Columns.Count >= maxColumns)
+            {
+                break;
+            }
+
             _table.Columns.Add(new TableViewTextColumn
             {
                 Header = header,
@@ -1141,6 +1199,13 @@ public sealed partial class VirtualHosterView : Grid
             return;
         }
 
+        // --wheel: scrolling at the speed a hand scrolls, which is the speed that hits the wall.
+        if (Environment.GetCommandLineArgs().Contains("--wheel"))
+        {
+            await WheelProbeAsync();
+            return;
+        }
+
         // --reanchor: a rebuild that changes nothing about what the list holds — a metadata edit —
         // must leave the reader where they were, across the offset clamp the Reset does.
         if (Environment.GetCommandLineArgs().Contains("--reanchor"))
@@ -1274,6 +1339,128 @@ public sealed partial class VirtualHosterView : Grid
     /// trackpad fling) while sampling how many realized rows intersect the viewport.
     /// Reports the longest zero-visible window and the worst UI-thread stall (a gap
     /// between samples means layout/prep blocked the thread that long).</summary>
+    /// <summary>
+    /// Scrolling at the speed a hand actually scrolls: a wheel notch or a trackpad glide, forty
+    /// pixels at a time, sixty times a second — not the viewport-sized hops <c>--fling</c> makes.
+    ///
+    /// <para>Those hops trip the layouter's large-scroll path, which throws everything away and
+    /// re-seeds from the average row height; it is cheap and it is not what a hand does. A hand
+    /// walks the list, and every row it walks past has to be realized: a container, its cells, its
+    /// bindings, its measure. This is the probe for the wall a reader hits twenty rows in.</para>
+    /// </summary>
+    private async Task WheelProbeAsync()
+    {
+        // --nolatency: no simulated store latency, so a stall that survives is not a page landing.
+        if (Environment.GetCommandLineArgs().Contains("--nolatency"))
+        {
+            _latencyMs = 0;
+        }
+
+        BuildSkeletonAndModel();
+        ScrollToOffset(0);
+        await SettleAsync();
+        _scrollViewer ??= FindScrollViewer(_table);
+        if (_scrollViewer is not { } sv)
+        {
+            Console.WriteLine("[hoster:wheel] no ScrollViewer");
+            Finish(false);
+            return;
+        }
+
+        // A macOS trackpad glide delivers tens of pixels a frame; a wheel notch is a few rows at
+        // once. Both are the same gesture as far as the panel is concerned — walk the list — and
+        // the bigger the notch the more rows each frame has to realize.
+        var notch = double.TryParse(ReadArg("--notch"), out var n) ? n : 40;
+        var steps = int.TryParse(ReadArg("--steps"), out var s) ? s : 400;
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var walls = new List<long>();
+        var gaps = new List<long>();
+        var stalls = new List<string>();
+        var last = sw.ElapsedMilliseconds;
+
+        // Counters read at the START of each step, so a step's deltas cover the whole frame that
+        // preceded it — the scroll call AND everything the thread did after it returned, which is
+        // where a landing page patches rows and the panel re-realizes them.
+        long prep0 = 0, prepT0 = 0, postT0 = 0, measT0 = 0, cellT0 = 0, cellPreT0 = 0, cells0 = 0,
+             arrT0 = 0, arr0 = 0, reads0 = 0, scans0 = 0, lists0 = 0, states0 = 0, statesT0 = 0, rowIdx0 = 0;
+
+        long Ms(long ticks) => ticks * 1000 / System.Diagnostics.Stopwatch.Frequency;
+
+        for (var i = 1; i <= steps; i++)
+        {
+            var t0 = sw.ElapsedMilliseconds;
+            var gap = t0 - last;
+            last = t0;
+
+            if (gap >= 50 && i > 2)
+            {
+                stalls.Add($"[hoster:wheel] stall step={i} gap={gap}ms offset={sv.VerticalOffset:F0} "
+                    + $"prepares={TableView.DiagPrepares - prep0} prepMs={Ms(TableView.DiagPrepareTicks - prepT0)} "
+                    + $"postPrepMs={Ms(TableView.DiagPostPrepareTicks - postT0)} "
+                    + $"rowMeasureMs={Ms(TableView.DiagRowMeasureTicks - measT0)} "
+                    + $"cellMeasures={TableView.DiagCellMeasures - cells0} "
+                    + $"cellMs={Ms(TableView.DiagCellMeasureTicks - cellT0)} "
+                    + $"cellPreMs={Ms(TableView.DiagCellPreMeasureTicks - cellPreT0)} "
+                    + $"rowArranges={TableView.DiagRowArranges - arr0} arrangeMs={Ms(TableView.DiagRowArrangeTicks - arrT0)} "
+                    + $"reads={VirtualTreeModel.DiagReads - reads0} idxScans={VirtualTreeModel.DiagIndexOfScans - scans0} "
+                    + $"cellLists={TableView.DiagCellListBuilds - lists0} rowIdx={TableView.DiagRowIndexLookups - rowIdx0} "
+                    + $"goToStates={TableView.DiagGoToStates - states0} "
+                    + $"goToStateMs={Ms(TableView.DiagGoToStateTicks - statesT0)}");
+            }
+
+            prep0 = TableView.DiagPrepares;
+            prepT0 = TableView.DiagPrepareTicks;
+            postT0 = TableView.DiagPostPrepareTicks;
+            measT0 = TableView.DiagRowMeasureTicks;
+            cellT0 = TableView.DiagCellMeasureTicks;
+            cellPreT0 = TableView.DiagCellPreMeasureTicks;
+            cells0 = TableView.DiagCellMeasures;
+            arrT0 = TableView.DiagRowArrangeTicks;
+            arr0 = TableView.DiagRowArranges;
+            reads0 = VirtualTreeModel.DiagReads;
+            scans0 = VirtualTreeModel.DiagIndexOfScans;
+            lists0 = TableView.DiagCellListBuilds;
+            rowIdx0 = TableView.DiagRowIndexLookups;
+            states0 = TableView.DiagGoToStates;
+            statesT0 = TableView.DiagGoToStateTicks;
+
+            sv.ChangeView(null, notch * i, null, disableAnimation: true);
+            var wall = sw.ElapsedMilliseconds - t0;
+
+            if (i > 2)
+            {
+                walls.Add(wall);
+                gaps.Add(gap);
+            }
+
+            await Task.Delay(16);       // the next frame, as a hand would deliver it
+        }
+
+        walls.Sort();
+        gaps.Sort();
+        var median = gaps[gaps.Count / 2];
+        var p99 = gaps[(int)(gaps.Count * 0.99)];
+        var worst = gaps[^1];
+
+        foreach (var stall in stalls.Take(12))
+        {
+            Console.WriteLine(stall);
+        }
+
+        Console.WriteLine($"[hoster:wheel] steps={steps} notch={notch:F0}px "
+            + $"gapMedian={median}ms gapP99={p99}ms gapWorst={worst}ms "
+            + $"wallMedian={walls[walls.Count / 2]}ms wallWorst={walls[^1]}ms "
+            + $"stalls>=50ms={stalls.Count}");
+
+        // A frame is 16ms. A step that costs more than three of them is a hitch a hand feels.
+        var ok = p99 <= 50 && worst <= 150;
+        Console.WriteLine(ok
+            ? $"[hoster:wheel] PASS — no step past 150ms, p99 {p99}ms"
+            : $"[hoster:wheel] FAIL — worst step {worst}ms, p99 {p99}ms");
+        Finish(ok);
+    }
+
     private async Task FlingProbeAsync()
     {
         // --fling-nolatency: zero store latency isolates the fill-burst backlog from

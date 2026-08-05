@@ -366,6 +366,7 @@ internal static class VisualStates
             return;
         }
 
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         foreach (var name in stateNames)
         {
             TableView.DiagGoToStates++;
@@ -374,5 +375,6 @@ internal static class VisualStates
                 break;
             }
         }
+        TableView.DiagGoToStateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
     }
 }
