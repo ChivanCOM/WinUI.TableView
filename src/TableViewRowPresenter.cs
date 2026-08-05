@@ -62,6 +62,7 @@ public partial class TableViewRowPresenter : Control
         _rootPanel = GetTemplateChild("RootPanel") as Panel;
         _scrollableCellsPanel = GetTemplateChild("ScrollableCellsPanel") as StackPanel;
         _frozenCellsPanel = GetTemplateChild("FrozenCellsPanel") as StackPanel;
+        InvalidateCells();   // new panels, so whatever was cached belonged to the old ones
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _detailsPanel = GetTemplateChild("DetailsPanel") as Panel;
@@ -112,12 +113,28 @@ public partial class TableViewRowPresenter : Control
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
-        _rowHeader?.InvalidateMeasure(); // The row header does not measure every time.
+        // The row header does not measure every time — but a collapsed one has nothing to measure,
+        // and asking anyway put a forced re-measure on every row of every pass in the common case
+        // where the grid shows no row headers at all.
+        if (_rowHeader is { Visibility: Visibility.Visible })
+        {
+            _rowHeader.InvalidateMeasure();
+        }
+
         return base.MeasureOverride(availableSize);
     }
 
     /// <inheritdoc/>
     protected override Size ArrangeOverride(Size finalSize)
+    {
+        TableView.DiagRowArranges++;
+        var diagT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var size = ArrangeCore(finalSize);
+        TableView.DiagRowArrangeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - diagT0;
+        return size;
+    }
+
+    private Size ArrangeCore(Size finalSize)
     {
         finalSize = base.ArrangeOverride(finalSize);
 
@@ -129,7 +146,14 @@ public partial class TableViewRowPresenter : Control
             var xScroll = -TableView.HorizontalOffset;
             var xClip = TableView.HorizontalOffset;
 
-            _rootPanel?.Arrange(new(left, 0, Math.Max(0, _rootPanel.ActualWidth), _rootPanel.ActualHeight));
+            // Shifted, not re-arranged. Both of these moves are a horizontal slide of an element
+            // that base.ArrangeOverride has already laid out at the right size — but calling
+            // Arrange again with a different origin makes the panel arrange all of its children
+            // again, so every row was arranging its whole set of cells twice on every pass. A
+            // translation moves the same laid-out subtree and leaves the children alone; it also
+            // participates in hit-testing and in TransformToVisual, which is what the grid-line
+            // offset below and the drag-selection hit test read.
+            Shift(_rootPanel, left);
 
             if (_detailsPanel?.Visibility is Visibility.Visible && _v_gridLine is not null)
             {
@@ -148,29 +172,93 @@ public partial class TableViewRowPresenter : Control
 
             if (_scrollableCellsPanel?.ActualWidth > 0 && _frozenCellsPanel is not null)
             {
-                xScroll += _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
+                var frozenRight = _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
+                xScroll += frozenRight;
 
-                _scrollableCellsPanel.Arrange(new(xScroll, 0, _scrollableCellsPanel.ActualWidth, _scrollableCellsPanel.ActualHeight));
-                _scrollableCellsPanel.Clip = xScroll >= _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth ? null :
-                    new RectangleGeometry
-                    {
-                        Rect = new(xClip, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - xClip), _scrollableCellsPanel.ActualHeight)
-                    };
+                Shift(_scrollableCellsPanel, xScroll);
+                Clip(_scrollableCellsPanel, ref _scrollableClip, xScroll >= frozenRight ? null :
+                    new Rect(xClip, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - xClip), _scrollableCellsPanel.ActualHeight));
             }
 
 
             if (_v_gridLine is not null && TableView is not null)
             {
-                var transform = _v_gridLine.TransformToVisual(this);
-                var relativePosition = transform.TransformPoint(new Point(0, 0));
-                var offset = _v_gridLine.Visibility is Visibility.Visible ? relativePosition.X : 0d;
-                offset -= Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
+                // Every realized row publishes the same grid-wide number, and computing it means a
+                // TransformToVisual walk. The answer only moves when this row's own geometry does,
+                // so the walk happens then and not nineteen times a pass for an unchanged value.
+                var key = (_v_gridLine.ActualOffset.X, _v_gridLine.Visibility, ActualWidth, left);
+                if (_gridLineOffsetKey != key)
+                {
+                    _gridLineOffsetKey = key;
 
-                TableView.SetValue(TableView.CellsHorizontalOffsetProperty, Math.Max(0, offset));
+                    var transform = _v_gridLine.TransformToVisual(this);
+                    var relativePosition = transform.TransformPoint(new Point(0, 0));
+                    var offset = _v_gridLine.Visibility is Visibility.Visible ? relativePosition.X : 0d;
+                    offset -= Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
+
+                    TableView.SetValue(TableView.CellsHorizontalOffsetProperty, Math.Max(0, offset));
+                }
             }
         }
 
         return finalSize;
+    }
+
+    private (double, Visibility, double, double) _gridLineOffsetKey = (double.NaN, default, double.NaN, double.NaN);
+    private RectangleGeometry? _scrollableClip;
+
+    /// <summary>Slides an already-arranged element so its left edge lands on <paramref name="x"/>,
+    /// without asking it — or its children — to lay out again.</summary>
+    private static void Shift(FrameworkElement? element, double x)
+    {
+        if (element is null)
+        {
+            return;
+        }
+
+        var delta = x - element.ActualOffset.X;
+
+        if (element.RenderTransform is not TranslateTransform translate)
+        {
+            if (delta == 0)
+            {
+                return;   // nothing to correct, and no transform worth allocating
+            }
+
+            element.RenderTransform = translate = new TranslateTransform();
+        }
+
+        // ActualOffset is where base.ArrangeOverride put it and is unaffected by the transform, so
+        // this stays a correction from the laid-out position rather than accumulating.
+        if (translate.X != delta)
+        {
+            translate.X = delta;
+        }
+    }
+
+    /// <summary>Clips an element to <paramref name="rect"/>, reusing the geometry rather than
+    /// allocating one per row per arrange. Null removes the clip.</summary>
+    private static void Clip(FrameworkElement element, ref RectangleGeometry? geometry, Rect? rect)
+    {
+        if (rect is not { } r)
+        {
+            if (element.Clip is not null)
+            {
+                element.Clip = null;
+            }
+            return;
+        }
+
+        geometry ??= new RectangleGeometry();
+        if (geometry.Rect != r)
+        {
+            geometry.Rect = r;
+        }
+
+        if (!ReferenceEquals(element.Clip, geometry))
+        {
+            element.Clip = geometry;
+        }
     }
 
     /// <summary>
@@ -387,25 +475,30 @@ public partial class TableViewRowPresenter : Control
     {
         if (TableView is null || cell is not { Column: { } column }) return;
 
-        var _frozenColumns = TableView.Columns.VisibleColumns.Where(x => x.IsFrozen).ToList();
-        var _scrollableColumns = TableView.Columns.VisibleColumns.Where(x => !x.IsFrozen).ToList();
+        TableView.DiagInsertCellScans++;
 
-        if (cell is { Column.IsFrozen: true } && _frozenCellsPanel is not null)
+        // Where this cell goes in its panel is how many columns of the SAME kind come before its
+        // own. Counting them is one pass; the two filtered lists this used to build were rebuilt
+        // for every cell of every row, which made realizing a row quadratic in its column count
+        // all over again — the same shape the cell's own index lookup had.
+        var panel = column.IsFrozen ? _frozenCellsPanel : _scrollableCellsPanel;
+        if (panel is null)
         {
-            var index = _frozenColumns.IndexOf(column);
-            index = Math.Min(index, _frozenColumns.Count);
-            index = Math.Max(index, 0); // handles -ve index;
-
-            _frozenCellsPanel.Children.Insert(index, cell);
+            return;
         }
-        else if (_scrollableCellsPanel is not null)
+
+        var visible = TableView.Columns.VisibleColumns;
+        var index = 0;
+        for (var i = 0; i < visible.Count && visible[i] != column; i++)
         {
-            var index = _scrollableColumns.IndexOf(column);
-            index = Math.Min(index, _scrollableColumns.Count);
-            index = Math.Max(index, 0); // handles -ve index;
-
-            _scrollableCellsPanel.Children.Insert(index, cell);
+            if (visible[i].IsFrozen == column.IsFrozen)
+            {
+                index++;
+            }
         }
+
+        panel.Children.Insert(Math.Clamp(index, 0, panel.Children.Count), cell);
+        InvalidateCells();
 
         cell.EnsureStyle(TableViewRow?.Content);
     }
@@ -416,13 +509,10 @@ public partial class TableViewRowPresenter : Control
     /// <param name="cell">The cell to remove.</param>
     public void RemoveCell(TableViewCell cell)
     {
-        if (_frozenCellsPanel?.Children.Contains(cell) ?? false)
+        if (_frozenCellsPanel?.Children.Remove(cell) is true
+            || _scrollableCellsPanel?.Children.Remove(cell) is true)
         {
-            _frozenCellsPanel.Children.Remove(cell);
-        }
-        else if (_scrollableCellsPanel?.Children.Contains(cell) ?? false)
-        {
-            _scrollableCellsPanel.Children.Remove(cell);
+            InvalidateCells();
         }
     }
 
@@ -474,14 +564,31 @@ public partial class TableViewRowPresenter : Control
     {
         _frozenCellsPanel?.Children.Clear();
         _scrollableCellsPanel?.Children.Clear();
+        InvalidateCells();
     }
 
     /// <summary>
-    /// Gets the list of cells in the presenter.
+    /// Gets the list of cells in the presenter, frozen ones first.
+    ///
+    /// <para>Cached. This used to materialise a fresh list on every read, and it is read the way
+    /// a field is: to apply a style, a height, a selection state, to find one cell by its column.
+    /// The set only changes when a cell is added, removed or reordered, so that is when it is
+    /// rebuilt.</para>
     /// </summary>
-    public IReadOnlyList<TableViewCell> Cells =>
+    public IReadOnlyList<TableViewCell> Cells => _cells ??= BuildCells();
+
+    private IReadOnlyList<TableViewCell>? _cells;
+
+    private IReadOnlyList<TableViewCell> BuildCells()
+    {
+        TableView.DiagCellListBuilds++;
+        return
         [.. _frozenCellsPanel?.Children.OfType<TableViewCell>() ?? [],
          .. _scrollableCellsPanel?.Children.OfType<TableViewCell>() ?? []];
+    }
+
+    /// <summary>Drops the cached cell list, for when the cells themselves changed.</summary>
+    private void InvalidateCells() => _cells = null;
 
     /// <summary>
     /// Gets or sets the TableViewRow associated with the presenter.

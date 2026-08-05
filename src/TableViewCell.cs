@@ -34,6 +34,11 @@ public partial class TableViewCell : ContentControl
     private Border? _selectionBorder;
     private Rectangle? _v_gridLine;
     private object? _uneditedValue;
+
+    /// <summary>One brush for every hidden grid line in the grid. Cells that hide theirs were
+    /// each allocating a fresh transparent brush, on every realize and every grid-line refresh.
+    /// </summary>
+    private static readonly SolidColorBrush TransparentFill = new(Colors.Transparent);
     private RoutedEventArgs? _editingArgs;
     private IList<TableViewConditionalCellStyle>? _cellStyles;
 
@@ -81,9 +86,24 @@ public partial class TableViewCell : ContentControl
     /// </summary>
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        InvalidateMeasure();
+        // Only a cell that has never been measured needs asking. A recycled one enters the tree
+        // again for every row that scrolls into view, and its content was already invalidated by
+        // SetElement a moment earlier — so this second request bought nothing but a second full
+        // measure pass over the whole viewport, which is exactly what it cost.
+        if (!_hasMeasured)
+        {
+            InvalidateMeasure();
+        }
+
         ApplySelectionState();
     }
+
+    /// <summary>True once this cell has been through a measure pass at least once.</summary>
+    private bool _hasMeasured;
+
+    /// <summary>The template column's inner presenter, and the content it was found under.</summary>
+    private ContentPresenter? _templatePresenter;
+    private object? _templatePresenterOwner;
 
     /// <inheritdoc/>
     protected override void OnApplyTemplate()
@@ -118,6 +138,16 @@ public partial class TableViewCell : ContentControl
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
+        TableView.DiagCellMeasures++;
+        _hasMeasured = true;
+        var diagT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var size = MeasureCore(availableSize, diagT0);
+        TableView.DiagCellMeasureTicks += System.Diagnostics.Stopwatch.GetTimestamp() - diagT0;
+        return size;
+    }
+
+    private Size MeasureCore(Size availableSize, long diagT0)
+    {
         if (TableView is not null && Column is not null && Row is not null && _contentPresenter is not null && Content is FrameworkElement element)
         {
             if (Column is TableViewTemplateColumn)
@@ -125,23 +155,38 @@ public partial class TableViewCell : ContentControl
 #if WINDOWS
                 if (element is ContentControl { ContentTemplateRoot: FrameworkElement root })
 #else
-                if (element.FindDescendant<ContentPresenter>() is { ContentTemplateRoot: FrameworkElement root })
+                // Cached: the walk to find it is per-measure work for an answer that only changes
+                // when the content does, and a template cell measures on every pass.
+                _templatePresenter = ReferenceEquals(_templatePresenterOwner, element)
+                    ? _templatePresenter
+                    : element.FindDescendant<ContentPresenter>();
+                _templatePresenterOwner = element;
+
+                if (_templatePresenter is { ContentTemplateRoot: FrameworkElement root })
 #endif
                     element = root;
                 else
                     return base.MeasureOverride(availableSize);
             }
 
-            #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
-            element.MaxWidth = double.PositiveInfinity;
-            element.MaxHeight = double.PositiveInfinity;
-            #endregion
-
-            element.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-
+            // A cell's own desired width is read by exactly one thing: the header row sizing an
+            // AUTO-width column (TableViewHeaderRow.GetColumnDesiredWidth). Star and absolute
+            // columns take their width from the grid or from a literal number and never look at
+            // it — so measuring every cell a second time, unconstrained, to feed that number is
+            // work with no reader. It was the largest single cost of realizing a row: nineteen
+            // columns meant nineteen extra full content measures per row, plus four dependency
+            // property writes per cell to clear and restore the clamps around them.
             var autoSizeMode = Column.ColumnAutoWidthMode ?? TableView.ColumnAutoWidthMode;
-            if (autoSizeMode is TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both)
+            if (Column.Width.IsAuto
+                && autoSizeMode is TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both)
             {
+                #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
+                element.MaxWidth = double.PositiveInfinity;
+                element.MaxHeight = double.PositiveInfinity;
+                #endregion
+
+                element.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+
                 var desiredWidth = element.DesiredSize.Width;
                 desiredWidth += Padding.Left;
                 desiredWidth += Padding.Right;
@@ -191,6 +236,7 @@ public partial class TableViewCell : ContentControl
             #endregion
         }
 
+        TableView.DiagCellPreMeasureTicks += System.Diagnostics.Stopwatch.GetTimestamp() - diagT0;
         return base.MeasureOverride(availableSize);
     }
 
@@ -787,7 +833,7 @@ public partial class TableViewCell : ContentControl
         if (_v_gridLine is not null && TableView is not null)
         {
             _v_gridLine.Fill = TableView.GridLinesVisibility is TableViewGridLinesVisibility.All or TableViewGridLinesVisibility.Vertical
-                               ? TableView.VerticalGridLinesStroke : new SolidColorBrush(Colors.Transparent);
+                               ? TableView.VerticalGridLinesStroke : TransparentFill;
             _v_gridLine.Width = TableView.VerticalGridLinesStrokeThickness;
             _v_gridLine.Visibility = TableView.HeaderGridLinesVisibility is TableViewGridLinesVisibility.All or TableViewGridLinesVisibility.Vertical
                                      || TableView.GridLinesVisibility is TableViewGridLinesVisibility.All or TableViewGridLinesVisibility.Vertical

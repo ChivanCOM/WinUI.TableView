@@ -65,8 +65,26 @@ public partial class TableViewTemplateColumn : TableViewColumn
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Rebinds the existing element where it can. A row is recycled precisely so its visuals
+    /// survive and only the data behind them changes — and every other column type honours that,
+    /// because a bound column's bindings simply re-resolve. This one used to build a fresh
+    /// <see cref="ContentControl"/> and inflate the whole <see cref="CellTemplate"/> again for
+    /// every one of its cells on every row that scrolled into view, which is the cost recycling
+    /// exists to avoid, paid on the scroll thread. Only a genuinely different template — which is
+    /// to say a <see cref="CellTemplateSelector"/> that chose another one for this item — still
+    /// needs the element rebuilt.
+    /// </remarks>
     public override void RefreshElement(TableViewCell cell, object? dataItem)
     {
+        var template = CellTemplateSelector?.SelectTemplate(dataItem) ?? CellTemplate;
+
+        if (cell.Content is ContentControl existing && Equals(existing.ContentTemplate, template))
+        {
+            existing.Content = dataItem;
+            return;
+        }
+
         cell.Content = GenerateElement(cell, dataItem);
     }
 

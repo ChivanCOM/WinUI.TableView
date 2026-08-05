@@ -149,6 +149,10 @@ public partial class TableViewRow : ListViewItem
     {
         base.OnContentChanged(oldContent, newContent);
 
+        // Bound to a different item: whatever index this container used to be at, it is not
+        // there now.
+        InvalidateIndex();
+
         if (_ensureCells)
         {
             EnsureCells();
@@ -647,7 +651,39 @@ public partial class TableViewRow : ListViewItem
     /// <summary>
     /// Gets the index of the row.
     /// </summary>
-    public int Index => TableView?.IndexFromContainer(this) ?? -1;
+    public int Index
+    {
+        get
+        {
+            if (TableView is not { } tableView)
+            {
+                return -1;
+            }
+
+            // Resolving this walks the panel, and a row is asked for its index constantly: by
+            // every cell that builds a Slot to answer IsSelected or IsCurrent, by the alternate
+            // colouring, by the selection painter. A viewport of nineteen rows was doing it
+            // fifteen hundred times per scroll hop for an answer that changes exactly twice —
+            // when the row is bound to a different item, and when the collection shifts under it.
+            // Both of those invalidate; nothing else has to ask again.
+            if (_indexGeneration != tableView.RowIndexGeneration)
+            {
+                TableView.DiagRowIndexLookups++;
+                _index = tableView.IndexFromContainer(this);
+                _indexGeneration = tableView.RowIndexGeneration;
+            }
+
+            return _index;
+        }
+    }
+
+    private int _index = -1;
+    private int _indexGeneration;
+
+    /// <summary>Forgets the cached <see cref="Index"/>, for when this row alone moved — it was
+    /// recycled onto another item. A shift under the whole viewport bumps
+    /// <see cref="TableView.RowIndexGeneration"/> instead.</summary>
+    internal void InvalidateIndex() => _indexGeneration = 0;
 
     /// <summary>
     /// Gets or sets the TableView associated with the row.

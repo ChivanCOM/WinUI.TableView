@@ -38,6 +38,16 @@ public sealed partial class VirtualHosterView : Grid
     /// <summary>Simulated store latency per page query.</summary>
     private int _latencyMs = 80;
 
+    /// <summary>How many columns the grid shows — <c>--columns N</c>, default 3.</summary>
+    private static readonly int ExtraColumns = ReadColumnCount();
+
+    private static int ReadColumnCount()
+    {
+        var args = Environment.GetCommandLineArgs();
+        var at = Array.IndexOf(args, "--columns");
+        return at >= 0 && at + 1 < args.Length && int.TryParse(args[at + 1], out var n) ? n : 3;
+    }
+
     public VirtualHosterView()
     {
         Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0E, 0x15, 0x20));
@@ -92,6 +102,37 @@ public sealed partial class VirtualHosterView : Grid
             IsReadOnly = true,
             Binding = new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(DemoNode.Title)) },
         });
+        // --columns N: pad out to N columns. Three columns hide everything that costs PER CELL,
+        // and the grid this stack exists for (the import queue) shows nineteen. A row realizing
+        // nineteen cells is where per-cell work stops being a rounding error.
+        for (var i = _table.Columns.Count; i < ExtraColumns; i++)
+        {
+            // Every fifth one is a TEMPLATE column, because the grid this stack exists for marks
+            // its rows with them (the check, the state glyph, the duplicate badge) and they take a
+            // different path through cell realization than a bound column does.
+            if (i % 5 == 0)
+            {
+                _table.Columns.Add(new TableViewTemplateColumn
+                {
+                    Header = $"Mark {i}",
+                    Width = new GridLength(30),
+                    CellTemplate = MarkTemplate(),
+                });
+                continue;
+            }
+
+            _table.Columns.Add(new TableViewTextColumn
+            {
+                Header = $"Col {i}",
+                Width = new GridLength(90),
+                IsReadOnly = true,
+                Binding = new Microsoft.UI.Xaml.Data.Binding
+                {
+                    Path = new PropertyPath(i % 2 == 0 ? nameof(DemoNode.Artist) : nameof(DemoNode.Title))
+                },
+            });
+        }
+
         SetRow(_table, 1);
         Children.Add(_table);
 
@@ -112,6 +153,16 @@ public sealed partial class VirtualHosterView : Grid
             await RunSelfTestAsync();
         };
     }
+
+    /// <summary>A mark cell of about the weight the import queue's are: a bordered glyph.</summary>
+    private static DataTemplate MarkTemplate() => (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
+        """
+        <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+          <Border Padding="2" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <TextBlock Text="{Binding Glyph}" FontSize="11" />
+          </Border>
+        </DataTemplate>
+        """);
 
     private static Button MakeButton(string label, Action action)
     {
@@ -557,7 +608,11 @@ public sealed partial class VirtualHosterView : Grid
             samples.Add((sw.ElapsedMilliseconds, visible, holes, sv.VerticalOffset));
         }
 
-        const int hops = 16;
+        // Enough hops that the median means something: single hops swing two-to-one on a laptop,
+        // and a fix worth keeping has to show up over the swing rather than inside it.
+        var hops = Environment.GetCommandLineArgs().Contains("--long") ? 60 : 16;
+        var walls = new List<long>();
+        var measures = new List<long>();
         for (var h = 1; h <= hops; h++)
         {
             var t0 = sw.ElapsedMilliseconds;
@@ -566,17 +621,43 @@ public sealed partial class VirtualHosterView : Grid
             var meas0 = TableView.DiagRowMeasureTicks;
             var reads0 = VirtualTreeModel.DiagReads;
             var scans0 = VirtualTreeModel.DiagIndexOfScans;
+            var cellLists0 = TableView.DiagCellListBuilds;
+            var rowIdx0 = TableView.DiagRowIndexLookups;
+            var alt0 = TableView.DiagAlternateSweeps;
+            var ins0 = TableView.DiagInsertCellScans;
+            var post0 = TableView.DiagPostPrepareTicks;
+            var states0 = TableView.DiagGoToStates;
+            var cm0 = TableView.DiagCellMeasureTicks;
+            var cpm0 = TableView.DiagCellPreMeasureTicks;
+            var cmc0 = TableView.DiagCellMeasures;
+            var ra0 = TableView.DiagRowArrangeTicks;
+            var rac0 = TableView.DiagRowArranges;
             sv.ChangeView(null, extent * h / (double)hops, null, true);
             Sample();
             await Task.Delay(16);
             Sample();
             var prepMs = (TableView.DiagPrepareTicks - prepT0) * 1000 / System.Diagnostics.Stopwatch.Frequency;
             var measMs = (TableView.DiagRowMeasureTicks - meas0) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            // The first few hops are the panel still filling; they say nothing about scrolling.
+            if (h > 4)
+            {
+                walls.Add(sw.ElapsedMilliseconds - t0);
+                measures.Add(measMs);
+            }
             var panelKids = _table.ItemsPanelRoot is { } panel ? panel.Children.Count : -1;
             Console.WriteLine($"[hoster:fling] hop {h:00} wall={sw.ElapsedMilliseconds - t0}ms "
                 + $"prepares={TableView.DiagPrepares - prep0} prepMs={prepMs} rowMeasureMs={measMs} "
                 + $"reads={VirtualTreeModel.DiagReads - reads0} idxScans={VirtualTreeModel.DiagIndexOfScans - scans0} "
-                + $"rows={RealizedRows().Count} panelKids={panelKids}");
+                + $"rows={RealizedRows().Count} panelKids={panelKids} "
+                + $"cellLists={TableView.DiagCellListBuilds - cellLists0} rowIdx={TableView.DiagRowIndexLookups - rowIdx0} "
+                + $"altSweeps={TableView.DiagAlternateSweeps - alt0} insScans={TableView.DiagInsertCellScans - ins0} "
+                + $"postPrepMs={(TableView.DiagPostPrepareTicks - post0) * 1000 / System.Diagnostics.Stopwatch.Frequency} "
+                + $"goToStates={TableView.DiagGoToStates - states0} "
+                + $"cellMeasures={TableView.DiagCellMeasures - cmc0} "
+                + $"cellMs={(TableView.DiagCellMeasureTicks - cm0) * 1000 / System.Diagnostics.Stopwatch.Frequency} "
+                + $"cellPreMs={(TableView.DiagCellPreMeasureTicks - cpm0) * 1000 / System.Diagnostics.Stopwatch.Frequency} "
+                + $"rowArranges={TableView.DiagRowArranges - rac0} "
+                + $"arrangeMs={(TableView.DiagRowArrangeTicks - ra0) * 1000 / System.Diagnostics.Stopwatch.Frequency}");
         }
         while (sw.ElapsedMilliseconds < 2500)
         {
@@ -601,6 +682,25 @@ public sealed partial class VirtualHosterView : Grid
         foreach (var s in samples)
             if (s.Visible == 0 || s.Holes > 0)
                 Console.WriteLine($"[hoster:fling] t={s.T}ms visible={s.Visible} holes={s.Holes} offset={s.Offset:F0}");
+        static long Median(List<long> xs)
+        {
+            if (xs.Count == 0) return 0;
+            var sorted = new List<long>(xs);
+            sorted.Sort();
+            return sorted[sorted.Count / 2];
+        }
+
+        static long P90(List<long> xs)
+        {
+            if (xs.Count == 0) return 0;
+            var sorted = new List<long>(xs);
+            sorted.Sort();
+            return sorted[Math.Min(sorted.Count - 1, (int)(sorted.Count * 0.9))];
+        }
+
+        Console.WriteLine($"[hoster:fling] SUMMARY hops={walls.Count} "
+            + $"wallMedian={Median(walls)}ms wallP90={P90(walls)}ms "
+            + $"rowMeasureMedian={Median(measures)}ms rowMeasureP90={P90(measures)}ms");
         Console.WriteLine($"[hoster:fling] extent={extent:F0} samples={samples.Count} worstBlank={worstBlank}ms@{blankAt}ms worstUiStall={worstGap}ms@{gapAt}ms");
 
         var ok = worstBlank < 200;

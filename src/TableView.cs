@@ -94,6 +94,7 @@ public partial class TableView : ListView
 
         base.ItemsSource = _collectionView;
         base.SelectionMode = SelectionMode;
+        _collectionView.VectorChanged += OnItemsMoved;
 #if !WINDOWS
         HookUnoVectorChanged(_collectionView);
 #endif
@@ -167,6 +168,34 @@ public partial class TableView : ListView
     public static long DiagPrepareTicks;
     public static long DiagRowMeasureTicks;
 
+    /// <summary>
+    /// Where a scroll hop's time goes, and how much of it is repeated work. The hoster's fling
+    /// probe prints these per hop: a count that scales with rows × columns when it should scale
+    /// with one of them is the signal to go looking. The timings say which of those counts is
+    /// worth caring about — several turned out not to be.
+    /// </summary>
+    public static long DiagPostPrepareTicks;
+    public static long DiagCellMeasureTicks;
+    public static long DiagCellPreMeasureTicks;
+    public static long DiagCellMeasures;
+    public static long DiagRowArrangeTicks;
+    public static long DiagRowArranges;
+    public static long DiagGoToStates;
+    public static long DiagCellListBuilds;
+    public static long DiagRowIndexLookups;
+    public static long DiagAlternateSweeps;
+    public static long DiagInsertCellScans;
+
+    /// <summary>
+    /// Bumped whenever items can have changed position, which is the only thing that can make a
+    /// realized row's cached <see cref="TableViewRow.Index"/> wrong without that row itself being
+    /// rebound. Starts at 1 so a row's initial generation of 0 always reads as stale.
+    /// </summary>
+    internal int RowIndexGeneration { get; private set; } = 1;
+
+    private void OnItemsMoved(IObservableVector<object> sender, IVectorChangedEventArgs args)
+        => RowIndexGeneration++;
+
     /// <inheritdoc/>
     protected override void PrepareContainerForItemOverride(DependencyObject element, object item)
     {
@@ -199,15 +228,21 @@ public partial class TableView : ListView
         // every TableViewRow ever created and turning the _rows iteration in
         // selection / layout / grid-line passes into an O(rows-ever-realized)
         // walk that compounds the per-click cost on large virtualized sources.
-        if (element is TableViewRow tracked && !_rows.Contains(tracked))
+        if (element is TableViewRow tracked)
         {
-            _rows.Add(tracked);
+            tracked.InvalidateIndex();
+
+            if (!_rows.Contains(tracked))
+            {
+                _rows.Add(tracked);
+            }
         }
 
         DispatcherQueue.TryEnqueue(() =>
         {
             if (element is TableViewRow row)
             {
+                var postT0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (!_rows.Contains(row))
                 {
                     _rows.Add(row);
@@ -226,6 +261,8 @@ public partial class TableView : ListView
                 {
                     row.ApplyCurrentCellState(CurrentCellSlot.Value);
                 }
+
+                DiagPostPrepareTicks += System.Diagnostics.Stopwatch.GetTimestamp() - postT0;
             }
         });
     }
@@ -1519,6 +1556,9 @@ public partial class TableView : ListView
     private void SwapItemsSource(ITableViewItemsSource newSource)
     {
         _collectionView.ItemPropertyChanged -= OnItemPropertyChanged;
+        _collectionView.VectorChanged -= OnItemsMoved;
+        newSource.VectorChanged += OnItemsMoved;
+        RowIndexGeneration++;   // a whole new list: every cached row index is about to be wrong
 #if !WINDOWS
         UnhookUnoVectorChanged(_collectionView);
         HookUnoVectorChanged(newSource);
@@ -2797,14 +2837,28 @@ public partial class TableView : ListView
     /// </summary>
     internal void EnsureAlternateRowColors()
     {
+        // Every row rebinding asks for this, and a scroll rebinds the whole viewport — so a
+        // single hop used to queue one whole-grid sweep PER ROW, each one re-colouring every
+        // other row and resolving every one of their indexes. One sweep says everything the
+        // twenty said; the rest were the same answer, computed again.
+        if (_alternateColorsQueued)
+        {
+            return;
+        }
+
+        _alternateColorsQueued = true;
         DispatcherQueue.TryEnqueue(() =>
         {
+            _alternateColorsQueued = false;
+            DiagAlternateSweeps++;
             foreach (var row in _rows)
             {
                 row.EnsureAlternateColors();
             }
         });
     }
+
+    private bool _alternateColorsQueued;
 
     /// <summary>
     /// Resets the auto-calculated widths of the specified columns and recalculates them.

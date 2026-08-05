@@ -368,6 +368,7 @@ internal static class VisualStates
 
         foreach (var name in stateNames)
         {
+            TableView.DiagGoToStates++;
             if (VisualStateManager.GoToState(control, name, useTransitions))
             {
                 break;

@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.VisualStudio.TestTools.UnitTesting.AppContainer;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -228,6 +229,110 @@ public class ForkPerformanceChangeTests
         Assert.IsNotNull(glyph, "the glyph did not render its bound value");
         Assert.AreEqual("A", ToolTipService.GetToolTip(glyph) as string,
             "the glyph did not take the tooltip it was bound to");
+    }
+
+    // ── a recycled row keeps its template cells ───────────────────────────────────────────────────
+    //
+    // Recycling exists so the visuals survive and only the data behind them changes. Every column
+    // type honoured that except the template column, which built a new ContentControl and inflated
+    // its CellTemplate again for every cell of every row that scrolled into view. What must still be
+    // true is that the cell shows the new item — and, when a selector picks a different template,
+    // that the element really is rebuilt.
+
+    [UITestMethod]
+    public async Task A_template_cell_is_rebound_not_rebuilt_when_its_row_takes_another_item()
+    {
+        var column = new TableViewTemplateColumn { Header = "Mark", CellTemplate = TextTemplate() };
+        var tableView = new TableView();
+        tableView.Columns.Add(column);
+        await LoadAsync(tableView);
+
+        var cell = FirstRow(tableView)?.Cells.FirstOrDefault();
+        Assert.IsNotNull(cell, "the template column realized no cell");
+
+        var before = cell!.Content;
+        Assert.IsInstanceOfType<ContentControl>(before, "a template cell holds a ContentControl");
+
+        var next = new Item { Name = "B", Other = "2" };
+        column.RefreshElement(cell, next);
+
+        Assert.AreSame(before, cell.Content, "the element was rebuilt instead of rebound");
+        Assert.AreSame(next, ((ContentControl)cell.Content!).Content, "the element kept the old item");
+    }
+
+    [UITestMethod]
+    public async Task A_template_cell_is_rebuilt_when_the_selector_chooses_another_template()
+    {
+        var first = TextTemplate();
+        var second = TextTemplate();
+        var column = new TableViewTemplateColumn
+        {
+            Header = "Mark",
+            CellTemplateSelector = new PerNameTemplateSelector(first, second),
+        };
+        var tableView = new TableView();
+        tableView.Columns.Add(column);
+        await LoadAsync(tableView);
+
+        var cell = FirstRow(tableView)?.Cells.FirstOrDefault();
+        Assert.IsNotNull(cell);
+
+        column.RefreshElement(cell!, new Item { Name = "A" });
+        var before = cell!.Content;
+
+        column.RefreshElement(cell, new Item { Name = "B" });   // selector switches template
+
+        Assert.AreNotSame(before, cell.Content, "a different template must produce a new element");
+        Assert.AreSame(second, ((ContentControl)cell.Content!).ContentTemplate);
+    }
+
+    private static DataTemplate TextTemplate() => (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
+        """
+        <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+          <TextBlock Text="{Binding Name}" />
+        </DataTemplate>
+        """);
+
+    private sealed class PerNameTemplateSelector(DataTemplate forA, DataTemplate other) : DataTemplateSelector
+    {
+        protected override DataTemplate SelectTemplateCore(object item)
+            => item is Item { Name: "A" } ? forA : other;
+
+        protected override DataTemplate SelectTemplateCore(object item, DependencyObject container)
+            => SelectTemplateCore(item);
+    }
+
+    // ── a row's index is cached, and the cache is not stale ───────────────────────────────────────
+    //
+    // Resolving it walks the panel, and it is asked for constantly — by every cell building a Slot
+    // to answer IsSelected. It is now remembered until something can have moved the row. The risk
+    // the cache carries is a stale answer, so that is what this pins.
+
+    [UITestMethod]
+    public async Task A_rows_index_survives_being_asked_twice_and_follows_an_insert_above_it()
+    {
+        var items = new ObservableCollection<Item>
+        {
+            new() { Name = "A" },
+            new() { Name = "B" },
+        };
+
+        var tableView = new TableView();
+        tableView.Columns.Add(Column("Name", nameof(Item.Name)));
+        tableView.ItemsSource = items;
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(tableView);
+
+        var rows = tableView.FindDescendants().OfType<TableViewRow>().ToList();
+        Assert.IsTrue(rows.Count >= 2, "expected both rows realized");
+
+        var second = rows.First(r => (r.Content as Item)?.Name == "B");
+        Assert.AreEqual(1, second.Index);
+        Assert.AreEqual(1, second.Index, "the cached answer disagreed with the first one");
+
+        items.Insert(0, new Item { Name = "Z" });
+        tableView.UpdateLayout();
+
+        Assert.AreEqual(2, second.Index, "the cache went stale across an insert above the row");
     }
 
     [UITestMethod]
