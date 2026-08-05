@@ -363,6 +363,127 @@ public sealed partial class VirtualHosterView : Grid
     }
 
     /// <summary>
+    /// Types a search term one character at a time, rebuilding the skeleton from the matching
+    /// subset each time — what the import grid's search box does — and times how long the UI thread
+    /// is blocked by each keystroke.
+    ///
+    /// <para>The store side of this is measured elsewhere and is not the question. The question is
+    /// what handing the model a new set of roots costs, because that is a Reset: every page dropped,
+    /// every segment rebuilt, every container recycled and re-realized, and whatever the panel does
+    /// afterwards to find its place again.</para>
+    /// </summary>
+    private async Task FilterProbeAsync()
+    {
+        if (_music is null)
+        {
+            Console.WriteLine("[hoster:filter] needs --music");
+            Finish(false);
+            return;
+        }
+
+        await SettleAsync();
+
+        // Filtering from the top is the easy case, and not the one anybody does: the search box is
+        // reached for after scrolling around looking for something. Scrolled down, the rebind has a
+        // scroll position it feels obliged to restore — into a list that no longer contains what was
+        // being looked at.
+        _scrollViewer ??= FindScrollViewer(_table);
+        if (_scrollViewer is { } sv)
+        {
+            sv.ChangeView(null, Math.Max(0, sv.ExtentHeight - sv.ViewportHeight) / 2, null, true);
+            await Task.Delay(200);
+            await SettleAsync();
+            Console.WriteLine($"[hoster:filter] typing from offset {sv.VerticalOffset:F0}");
+        }
+
+        var worst = 0L;
+        var term = "";
+
+        foreach (var ch in "beatles")
+        {
+            term += ch;
+
+            // The filtered skeleton, built the way the queue builds it: only groups with a match.
+            var t0 = System.Diagnostics.Stopwatch.StartNew();
+            var roots = FilteredRoots(term);
+            var buildMs = t0.ElapsedMilliseconds;
+
+            // The UI-thread half — the only half the user feels.
+            var prepares0 = TableView.DiagPrepares;
+            var t1 = System.Diagnostics.Stopwatch.StartNew();
+            _model.SetRoots(roots);
+            var setRootsMs = t1.ElapsedMilliseconds;
+            _table.UpdateLayout();
+            var blockMs = t1.ElapsedMilliseconds;
+
+            await Task.Delay(60);
+
+            var settle = System.Diagnostics.Stopwatch.StartNew();
+            await SettleAsync();
+            worst = Math.Max(worst, blockMs);
+
+            Console.WriteLine($"[hoster:filter] \"{term}\" groups={roots.Count} rows={_source.Count} "
+                + $"buildMs={buildMs} setRootsMs={setRootsMs} layoutMs={blockMs - setRootsMs} "
+                + $"uiBlockMs={blockMs} settleMs={settle.ElapsedMilliseconds} "
+                + $"prepares={TableView.DiagPrepares - prepares0}");
+        }
+
+        // And clearing it again, which is the widest reset of all — back to everything.
+        var t2 = System.Diagnostics.Stopwatch.StartNew();
+        _model.SetRoots(_rootsAll);
+        _table.UpdateLayout();
+        Console.WriteLine($"[hoster:filter] cleared rows={_source.Count} uiBlockMs={t2.ElapsedMilliseconds}");
+        worst = Math.Max(worst, t2.ElapsedMilliseconds);
+
+        var ok = worst < 150;
+        Console.WriteLine(ok
+            ? $"[hoster:filter] PASS — worst keystroke blocked the UI for {worst}ms"
+            : $"[hoster:filter] FAIL — a keystroke blocked the UI for {worst}ms");
+        Finish(ok);
+    }
+
+    private List<DemoNode> _rootsAll = new();
+
+    /// <summary>The skeleton for a search term: artists and albums that still hold a matching track,
+    /// with the leaf counts narrowed to the matches — the shape QueueGroups(search) returns.</summary>
+    private List<DemoNode> FilteredRoots(string term)
+    {
+        var roots = new List<DemoNode>();
+        _musicLeaves.Clear();
+
+        foreach (var (artist, albums) in _music!.Artists)
+        {
+            DemoNode? artistNode = null;
+
+            foreach (var (album, tracks) in albums)
+            {
+                var hits = tracks.Where(t => Matches(t, term)).ToArray();
+                if (hits.Length == 0)
+                {
+                    continue;
+                }
+
+                artistNode ??= new DemoNode(artist, 0);
+                var albumNode = new DemoNode(album, 1) { LeafCount = hits.Length };
+                artistNode.Children.Add(albumNode);
+                _musicLeaves[albumNode] = hits;
+            }
+
+            if (artistNode is not null)
+            {
+                roots.Add(artistNode);
+            }
+        }
+
+        return roots;
+    }
+
+    private static bool Matches(MusicTrack t, string term) =>
+        t.DisplayName.Contains(term, StringComparison.OrdinalIgnoreCase)
+        || t.Artist.Contains(term, StringComparison.OrdinalIgnoreCase)
+        || t.Album.Contains(term, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Renders the grid and counts, for each row-height band, how many pixels differ from the most
     /// common colour in that band. A band that draws text and glyphs has thousands; a band that
     /// draws only its own background has none.
@@ -584,6 +705,7 @@ public sealed partial class VirtualHosterView : Grid
             placeholderOf: PlaceholderFor,
             pageSize: PageSize);
         _model.SetRoots(_roots);
+        _rootsAll = _roots;
         _source = new VirtualTreeItemsSource(_model);
         _table.ItemsSource = _source;
 
@@ -896,6 +1018,15 @@ public sealed partial class VirtualHosterView : Grid
         if (Environment.GetCommandLineArgs().Contains("--fling"))
         {
             await FlingProbeAsync();
+            return;
+        }
+
+        // --filter: typing in the grid's search box. Each keystroke narrows the collection and hands
+        // the model a new skeleton, which is a Reset — the single most expensive thing that can
+        // happen to a virtualized list, and it happens once per character.
+        if (Environment.GetCommandLineArgs().Contains("--filter"))
+        {
+            await FilterProbeAsync();
             return;
         }
 

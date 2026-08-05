@@ -1151,6 +1151,10 @@ public partial class TableView : ListView
     // container, which is the direct cause of the "rows stay empty too long" jank. Anything
     // structural in the burst (Reset / insert / remove), or a burst larger than the cap, still
     // forces the full re-point.
+    /// <summary>How many rows the list had at the previous Reset, so the next one can tell a list
+    /// that changed shape from a list that was merely re-read.</summary>
+    private int _lastResetCount;
+
     private bool _unoBurstNeedsRebind;
     private bool _unoShiftReseat;
     private readonly HashSet<int> _unoChangedIndices = new();
@@ -1190,6 +1194,26 @@ public partial class TableView : ListView
         else
         {
             _unoBurstNeedsRebind = true; // Reset: structural beyond repair, re-point
+
+            // And if the list changed size wholesale — a search box being typed into, a filter
+            // applied, ten thousand duplicates removed — the offset goes back to the top NOW,
+            // synchronously, before anything can lay out against it.
+            //
+            // It cannot wait for the rebind on the dispatcher. A layout pass in between finds the
+            // panel still parked at an offset deep inside a list that has just shrunk, and Uno's
+            // layouter fills line by line from its seed towards that position, realizing a whole
+            // row of cells for every line on the way. That is the interface freezing solid on a
+            // keystroke, and the further down the list the search box was reached for, the longer
+            // it freezes. The reader's place was destroyed by the change, not moved by it; the top
+            // is the honest answer and the only cheap one.
+            var count = Items?.Count ?? 0;
+            if (_lastResetCount > 0 && Math.Abs(count - _lastResetCount) * 10 > _lastResetCount
+                && _scrollViewer is { VerticalOffset: > 0 } sv)
+            {
+                sv.ChangeView(null, 0, null, disableAnimation: true);
+            }
+
+            _lastResetCount = count;
         }
 
         if (_unoRefreshQueued)
@@ -1278,8 +1302,24 @@ public partial class TableView : ListView
 
         if (ReanchorTrace)
                 Console.WriteLine($"[reanchor] rebind offset={_unoReanchorOffset:F0} sv={(_scrollViewer is not null)}");
-        if (_unoReanchorOffset > 0 && _scrollViewer is not null)
+
+        if (_unoReanchorOffset > 0 && _scrollViewer is { } sv)
         {
+            // A list that changed wholesale — a search box being typed into, a filter applied, ten
+            // thousand duplicates removed — did not move the reader's place, it destroyed it. Going
+            // back to the top is the honest answer, and it is the only cheap one: leaving the offset
+            // deep in a list that just shrank leaves the panel filling line by line from its seed
+            // towards a position that no longer means anything, realizing a whole row of cells for
+            // each line on the way. That is the interface freezing solid on a keystroke, and the
+            // further down the list the search box was reached for, the longer it freezes.
+            if (!AnchorRowIsMeaningful())
+            {
+                sv.ChangeView(null, 0, null, disableAnimation: true);
+                _unoReanchorOffset = 0;
+                _unoReanchorCandidates.Clear();
+                return;
+            }
+
             _unoReanchorPending = true;
             _unoReanchorPrepares = 0;
         }
@@ -1379,14 +1419,35 @@ public partial class TableView : ListView
             return;
         }
 
+        var meaningful = AnchorRowIsMeaningful();
         var anchorIndex = -1;
-        if (AnchorRowIsMeaningful())
+        if (meaningful)
         {
             foreach (var item in _unoReanchorCandidates)
             {
                 anchorIndex = ResolveAnchorIndex(item);
                 if (anchorIndex >= 0) break;
             }
+        }
+
+        // A list that changed wholesale — a search box being typed into, a filter applied, ten
+        // thousand duplicates removed — did not move the reader's place. It destroyed it. There is
+        // nothing left to restore, so whatever the ScrollViewer has already clamped the offset to
+        // is the honest answer, and this is finished.
+        //
+        // What it did instead was aim at the offset from the PREVIOUS list and keep aiming: every
+        // ChangeView triggers prepares, every prepare comes back here, and the target is never
+        // reached because the extent is still growing underneath it — so it ran to the
+        // four-hundred-round cap, each round realizing a whole viewport of cells. That is the
+        // interface freezing solid on every keystroke of a search, and the further down the list
+        // the search box was reached for, the longer it freezes.
+        if (!meaningful)
+        {
+            _unoReanchorPending = false;
+            _unoReanchorCandidates.Clear();
+            ReseatPanelRows();
+            _unoReseatBurstsLeft = 5;
+            return;
         }
 
         var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
