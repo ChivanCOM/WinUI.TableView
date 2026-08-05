@@ -76,15 +76,30 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
                 break;
         }
 
+        _visibleColumns = null;
         _itemsCopy = new TableViewColumn[Count];
         CopyTo(_itemsCopy, 0);
     }
 
     internal void UpdateFrozenColumns()
     {
+        // One projection, and the position comes from the walk — this used to rebuild the list and
+        // scan it once per column, which is quadratic in the number of columns for a fact the loop
+        // already knows.
+        var visible = VisibleColumns;
+        var frozen = TableView?.FrozenColumnCount ?? 0;
+
+        for (var i = 0; i < visible.Count; i++)
+        {
+            visible[i].IsFrozen = i < frozen;
+        }
+
         foreach (var column in this.OfType<TableViewColumn>())
         {
-            column.IsFrozen = VisibleColumns.IndexOf(column) < (TableView?.FrozenColumnCount ?? 0);
+            if (column.Visibility != Visibility.Visible)
+            {
+                column.IsFrozen = false;
+            }
         }
     }
 
@@ -93,6 +108,11 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     /// </summary>
     internal void HandleColumnPropertyChanged(TableViewColumn column, string propertyName)
     {
+        if (propertyName is nameof(TableViewColumn.Visibility) or nameof(TableViewColumn.Order))
+        {
+            _visibleColumns = null;
+        }
+
         if (Contains(column) && !_movingColumn)
         {
             var index = IndexOf(column);
@@ -103,10 +123,22 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     /// <inheritdoc/>
     public TableView? TableView { get; }
 
+    // The visible columns, worked out once and kept until something can have changed them.
+    //
+    // This was a LINQ projection materialising a NEW list on every read, and it is read on the hot
+    // path: a row realizing nineteen cells asked for it nineteen times purely to look up each cell's
+    // own index — nineteen list allocations and nineteen linear scans per row, before a pixel is
+    // laid out. UpdateFrozenColumns did the same thing to itself. Invalidated by the two events that
+    // can alter it: the collection changing, and a column's Visibility or Order moving.
+    private IList<TableViewColumn>? _visibleColumns;
+
     /// <inheritdoc/>
-    public IList<TableViewColumn> VisibleColumns => [.. this.OfType<TableViewColumn>()
+    public IList<TableViewColumn> VisibleColumns => _visibleColumns ??= [.. this.OfType<TableViewColumn>()
                                                             .Where(x => x.Visibility == Visibility.Visible)
                                                             .OrderBy(x => x.Order ?? 0)];
+
+    /// <summary>Drops the cached projection. Cheap to call; the next reader rebuilds it.</summary>
+    internal void InvalidateVisibleColumns() => _visibleColumns = null;
 
     TableViewColumn IList<TableViewColumn>.this[int index]
     {

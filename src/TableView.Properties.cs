@@ -45,17 +45,31 @@ public partial class TableView
     /// <summary>
     /// Identifies the RowHeight dependency property.
     /// </summary>
-    public static readonly DependencyProperty RowHeightProperty = DependencyProperty.Register(nameof(RowHeight), typeof(double), typeof(TableView), new PropertyMetadata(double.NaN));
+    /// <summary>The row metrics moved; the realized rows' cells take the new values directly. They
+    /// used to each carry a binding waiting for this, which cost a binding per cell per row for a
+    /// value that changes about never.</summary>
+    private static void OnRowHeightChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView { _rows: { } rows })
+        {
+            foreach (var row in rows)
+            {
+                row.ApplyRowHeights();
+            }
+        }
+    }
+
+    public static readonly DependencyProperty RowHeightProperty = DependencyProperty.Register(nameof(RowHeight), typeof(double), typeof(TableView), new PropertyMetadata(double.NaN, OnRowHeightChanged));
 
     /// <summary>
     /// Identifies the RowMaxHeight dependency property.
     /// </summary>
-    public static readonly DependencyProperty RowMaxHeightProperty = DependencyProperty.Register(nameof(RowMaxHeight), typeof(double), typeof(TableView), new PropertyMetadata(double.PositiveInfinity));
+    public static readonly DependencyProperty RowMaxHeightProperty = DependencyProperty.Register(nameof(RowMaxHeight), typeof(double), typeof(TableView), new PropertyMetadata(double.PositiveInfinity, OnRowHeightChanged));
 
     /// <summary>
     /// Identifies the RowMinHeight dependency property.
     /// </summary>
-    public static readonly DependencyProperty RowMinHeightProperty = DependencyProperty.Register(nameof(RowMinHeight), typeof(double), typeof(TableView), new PropertyMetadata(40d));
+    public static readonly DependencyProperty RowMinHeightProperty = DependencyProperty.Register(nameof(RowMinHeight), typeof(double), typeof(TableView), new PropertyMetadata(40d, OnRowHeightChanged));
 
     /// <summary>
     /// Identifies the ShowExportOptions dependency property.

@@ -226,6 +226,23 @@ public partial class TableViewRow : ListViewItem
         return finalSize;
     }
 
+    /// <summary>Pushes the TableView's current row heights onto this row's cells. Called when one of
+    /// them actually changes, which is what the per-cell bindings used to wait around for.</summary>
+    internal void ApplyRowHeights()
+    {
+        if (TableView is null)
+        {
+            return;
+        }
+
+        foreach (var cell in Cells)
+        {
+            cell.Height = TableView.RowHeight;
+            cell.MaxHeight = TableView.RowMaxHeight;
+            cell.MinHeight = TableView.RowMinHeight;
+        }
+    }
+
     /// <summary>
     /// Ensures cells are created for the row.
     /// </summary>
@@ -352,6 +369,10 @@ public partial class TableViewRow : ListViewItem
     {
         if (RowPresenter is not null && TableView is not null)
         {
+            // Read once, not once per cell: this is a projection that rebuilds on access, and asking
+            // it for each cell's own index made realizing a row quadratic in its column count.
+            var visible = TableView.Columns.VisibleColumns;
+
             foreach (var column in columns)
             {
                 var cell = new TableViewCell
@@ -359,27 +380,18 @@ public partial class TableViewRow : ListViewItem
                     Row = this,
                     Column = column,
                     TableView = TableView,
-                    Index = TableView.Columns.VisibleColumns.IndexOf(column),
+                    Index = visible.IndexOf(column),
                     Width = column.ActualWidth
                 };
 
-                cell.SetBinding(HeightProperty, new Binding
-                {
-                    Path = new PropertyPath($"{nameof(TableViewCell.TableView)}.{nameof(TableView.RowHeight)}"),
-                    RelativeSource = new RelativeSource { Mode = RelativeSourceMode.Self }
-                });
-
-                cell.SetBinding(MaxHeightProperty, new Binding
-                {
-                    Path = new PropertyPath($"{nameof(TableViewCell.TableView)}.{nameof(TableView.RowMaxHeight)}"),
-                    RelativeSource = new RelativeSource { Mode = RelativeSourceMode.Self }
-                });
-
-                cell.SetBinding(MinHeightProperty, new Binding
-                {
-                    Path = new PropertyPath($"{nameof(TableViewCell.TableView)}.{nameof(TableView.RowMinHeight)}"),
-                    RelativeSource = new RelativeSource { Mode = RelativeSourceMode.Self }
-                });
+                // Set, not bound. These three carried a live binding each — three per cell, and a
+                // grid with nineteen columns realizes nineteen cells a row, so a viewport was
+                // holding thousands of bindings whose whole job was to relay a number that does not
+                // change while you scroll. The TableView pushes the new value on the rare occasion
+                // one of them does (see ApplyRowHeights).
+                cell.Height = TableView.RowHeight;
+                cell.MaxHeight = TableView.RowMaxHeight;
+                cell.MinHeight = TableView.RowMinHeight;
 
                 RowPresenter.InsertCell(cell);
             }
