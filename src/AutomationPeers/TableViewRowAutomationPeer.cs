@@ -56,17 +56,20 @@ public partial class TableViewRowAutomationPeer : ListViewItemAutomationPeer, IE
             return base.GetHelpTextCore();
         }
 
+        // Over the COLUMNS, not over the cells this row happens to have built. What a row says it
+        // holds must not depend on what is currently on screen: with column virtualization a row
+        // builds cells only for the columns in view, so reading this off the cells would announce
+        // nine columns of twenty-three and silently drop the rest — and which nine would change as
+        // the reader scrolled sideways. The value never needed a cell in any case; it comes from the
+        // column and the item, the same way copying and exporting get it.
         var parts = new System.Collections.Generic.List<string>();
-        foreach (var cell in _owner.Cells)
+        foreach (var column in tableView.Columns.VisibleColumns)
         {
-            if (cell.Column is { } column)
+            var headerText = GetColumnHeaderText(column);
+            var value = column.GetCellContent(_owner.Content)?.ToString() ?? string.Empty;
+            if (!string.IsNullOrEmpty(headerText))
             {
-                var headerText = GetColumnHeaderText(column);
-                var value = column.GetCellContent(_owner.Content)?.ToString() ?? string.Empty;
-                if (!string.IsNullOrEmpty(headerText))
-                {
-                    parts.Add($"{headerText}: {value}");
-                }
+                parts.Add($"{headerText}: {value}");
             }
         }
 
