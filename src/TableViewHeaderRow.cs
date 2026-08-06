@@ -71,7 +71,19 @@ public partial class TableViewHeaderRow : Control
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _frozenHeadersPanel = GetTemplateChild("FrozenHeadersPanel") as StackPanel;
+
+        if (_scrollableHeadersPanel is not null)
+        {
+            _scrollableHeadersPanel.SizeChanged -= OnScrollableHeadersPanelSizeChanged;
+        }
+
         _scrollableHeadersPanel = GetTemplateChild("ScrollableHeadersPanel") as StackPanel;
+
+        if (_scrollableHeadersPanel is not null)
+        {
+            _scrollableHeadersPanel.SizeChanged += OnScrollableHeadersPanelSizeChanged;
+        }
+
         _columnDropIndicator = GetTemplateChild("ColumnDropIndicator") as Border;
         _columnDropIndicatorTransform = GetTemplateChild("ColumnDropIndicatorTransform") as TranslateTransform;
         _dragHeaderImage = GetTemplateChild("DragHeaderImage") as Image;
@@ -123,6 +135,22 @@ public partial class TableViewHeaderRow : Control
         }
 
         return finalSize;
+    }
+
+    /// <summary>
+    /// Re-applies the horizontal offset to the header strip after its size changes.
+    ///
+    /// <para>The strip is not scrolled by a ScrollViewer: <see cref="ArrangeOverride"/> arranges it
+    /// at minus the grid's horizontal offset, on top of the position its parent gave it. That is a
+    /// position the layout system does not remember — when the panel is re-laid-out on its own,
+    /// which is what a column being resized does to it, it goes back to the rect the base arrange
+    /// gave it and the headers snap back to the left, leaving every header standing over the wrong
+    /// column until something else invalidates this row. Widening a column is exactly when that is
+    /// most visible, and it is why the strip came right again only on a second resize.</para>
+    /// </summary>
+    private void OnScrollableHeadersPanelSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        InvalidateArrange();
     }
 
     /// <summary>
@@ -349,6 +377,11 @@ public partial class TableViewHeaderRow : Control
             _calculatingHeaderWidths = false;
 
             TableView.UpdateHorizontalScrollBarMargin();
+
+            // Column widths are half of what decides which columns are on screen, and this is where
+            // they settle — including after the grid is resized, which is the other half. Queued,
+            // because acting on it rebuilds rows and this runs inside a layout pass.
+            TableView.QueueColumnRangeUpdate();
         }
     }
 
