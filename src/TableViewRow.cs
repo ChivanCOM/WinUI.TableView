@@ -150,8 +150,9 @@ public partial class TableViewRow : ListViewItem
         base.OnContentChanged(oldContent, newContent);
 
         // Bound to a different item: whatever index this container used to be at, it is not
-        // there now.
+        // there now, and a parked cell still shows the old item's value.
         InvalidateIndex();
+        ClearParkedCells();
 
         if (_ensureCells)
         {
@@ -260,10 +261,22 @@ public partial class TableViewRow : ListViewItem
         if (RowPresenter is not null && _ensureCells)
         {
             RowPresenter.ClearCells();
+            ClearParkedCells();
 
             AddCells(TableView.Columns.VisibleColumns);
+            AdoptColumnGeometry();
             _ensureCells = false;
         }
+    }
+
+    /// <summary>
+    /// Throws this row's cells away and builds the ones the current column range calls for. Called
+    /// when that range moves — a horizontal scroll that crossed a column boundary.
+    /// </summary>
+    internal void RebuildCells()
+    {
+        _ensureCells = true;
+        EnsureCells();
     }
 
     /// <summary>
@@ -379,28 +392,201 @@ public partial class TableViewRow : ListViewItem
 
             foreach (var column in columns)
             {
-                var cell = new TableViewCell
-                {
-                    Row = this,
-                    Column = column,
-                    TableView = TableView,
-                    Index = visible.IndexOf(column),
-                    Width = column.ActualWidth
-                };
-
-                // Set, not bound. These three carried a live binding each — three per cell, and a
-                // grid with nineteen columns realizes nineteen cells a row, so a viewport was
-                // holding thousands of bindings whose whole job was to relay a number that does not
-                // change while you scroll. The TableView pushes the new value on the rare occasion
-                // one of them does (see ApplyRowHeights).
-                cell.Height = TableView.RowHeight;
-                cell.MaxHeight = TableView.RowMaxHeight;
-                cell.MinHeight = TableView.RowMinHeight;
-
-                RowPresenter.InsertCell(cell);
+                AddCell(column, visible.IndexOf(column));
             }
         }
     }
+
+    /// <summary>
+    /// Builds this row's cell for one column, if that column is one this row should be showing.
+    /// </summary>
+    /// <param name="column">The column to build a cell for.</param>
+    /// <param name="index">Its index among the visible columns.</param>
+    private void AddCell(TableViewColumn column, int index)
+    {
+        if (RowPresenter is null || TableView is null)
+        {
+            return;
+        }
+
+        // Off screen and not frozen: no cell. Every path that adds one comes through here, so a
+        // column made visible or reordered while scrolled away stays unbuilt too.
+        if (!TableView.IsColumnRealized(column, index))
+        {
+            return;
+        }
+
+        var cell = new TableViewCell
+        {
+            Row = this,
+            Column = column,
+            TableView = TableView,
+            Index = index,
+            Width = column.ActualWidth
+        };
+
+        // Set, not bound. These three carried a live binding each — three per cell, and a grid with
+        // nineteen columns realizes nineteen cells a row, so a viewport was holding thousands of
+        // bindings whose whole job was to relay a number that does not change while you scroll. The
+        // TableView pushes the new value on the rare occasion one of them does (see
+        // ApplyRowHeights).
+        cell.Height = TableView.RowHeight;
+        cell.MaxHeight = TableView.RowMaxHeight;
+        cell.MinHeight = TableView.RowMinHeight;
+
+        RowPresenter.InsertCell(cell);
+    }
+
+    /// <summary>
+    /// Brings this row's cells in line with the column range as it stands now: builds the ones that
+    /// have scrolled into view, drops the ones that have scrolled out, and leaves everything in
+    /// between alone.
+    ///
+    /// <para>Crossing one column boundary changes one cell per row. Throwing the row away and
+    /// rebuilding it instead — which is what this replaced — rebuilt all twenty-three of them, and a
+    /// drag across the grid crosses a boundary every few pixels, so the cost of scrolling sideways
+    /// became the cost of rebinding the entire viewport several dozen times.</para>
+    /// </summary>
+    internal void SyncCells()
+    {
+        if (TableView is null || RowPresenter is null)
+        {
+            return;
+        }
+
+        if (_ensureCells)
+        {
+            EnsureCells();   // nothing built yet: the from-scratch path is the cheaper one
+            return;
+        }
+
+        SyncCellsCore();
+        AdoptColumnGeometry();
+    }
+
+    /// <summary>Takes on the grid's current column geometry, which is only true of this row once
+    /// its cells match the range that geometry describes.</summary>
+    internal void AdoptColumnGeometry()
+    {
+        if (TableView is null || RowPresenter is null)
+        {
+            return;
+        }
+
+        RowPresenter.CellsInset = TableView.ColumnRangeInset;
+        RowPresenter.CellsHiddenWidth = TableView.ColumnRangeHiddenWidth;
+        RowPresenter.InvalidateMeasure();
+        RowPresenter.InvalidateArrange();
+    }
+
+    private void SyncCellsCore()
+    {
+        if (TableView is null || RowPresenter is null)
+        {
+            return;
+        }
+
+        List<TableViewCell>? leaving = null;
+        var held = new HashSet<TableViewColumn>();
+
+        foreach (var cell in Cells)
+        {
+            if (cell.Column is { } column && TableView.IsColumnRealized(column, cell.Index))
+            {
+                held.Add(column);
+            }
+            else
+            {
+                (leaving ??= []).Add(cell);
+            }
+        }
+
+        if (leaving is not null)
+        {
+            foreach (var cell in leaving)
+            {
+                RowPresenter.RemoveCell(cell);
+                Park(cell);
+            }
+        }
+
+        var visible = TableView.Columns.VisibleColumns;
+
+        for (var i = 0; i < visible.Count; i++)
+        {
+            var column = visible[i];
+            if (!TableView.IsColumnRealized(column, i) || held.Contains(column))
+            {
+                continue;
+            }
+
+            if (Unpark(column) is { } parked)
+            {
+                parked.Index = i;
+                parked.Width = column.ActualWidth;
+                RowPresenter.InsertCell(parked);
+            }
+            else
+            {
+                AddCell(column, i);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Cells for columns that have scrolled out of view, kept out of the tree rather than thrown
+    /// away.
+    ///
+    /// <para>Reading a grid sideways is not a one-way trip: people nudge it a column or two and
+    /// come back. Rebuilding those cells every time was most of what made a horizontal drag cost
+    /// more than the vertical one it was meant to speed up — and a cell that is out of the visual
+    /// tree costs nothing to measure or arrange, which is what the virtualization was for.</para>
+    /// </summary>
+    private List<TableViewCell>? _parkedCells;
+
+    /// <summary>How many. Enough to cover a nudge either side of the viewport; a reader who has
+    /// gone further than that has left those columns behind.</summary>
+    private const int ParkedCellLimit = 8;
+
+    private void Park(TableViewCell cell)
+    {
+        if (cell.Column is null)
+        {
+            return;
+        }
+
+        _parkedCells ??= [];
+        _parkedCells.Add(cell);
+
+        while (_parkedCells.Count > ParkedCellLimit)
+        {
+            _parkedCells.RemoveAt(0);   // the one parked longest ago is the one least likely to return
+        }
+    }
+
+    private TableViewCell? Unpark(TableViewColumn column)
+    {
+        if (_parkedCells is null)
+        {
+            return null;
+        }
+
+        for (var i = 0; i < _parkedCells.Count; i++)
+        {
+            if (_parkedCells[i].Column == column)
+            {
+                var cell = _parkedCells[i];
+                _parkedCells.RemoveAt(i);
+                return cell;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Empties the park, for when what is in it can no longer be trusted — this row is
+    /// showing a different item, or its cells are being rebuilt from scratch.</summary>
+    private void ClearParkedCells() => _parkedCells?.Clear();
 
     /// <summary>
     /// Handles the TableView changing event.
@@ -500,10 +686,16 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     internal void ApplyCurrentCellState(TableViewCellSlot slot)
     {
-        if (slot.Column >= 0 && slot.Column < Cells.Count)
+        // By the cell's own column index, not by its position in the list: the list holds the frozen
+        // cells first and, when columns are virtualized, only the realized ones — neither of which
+        // puts column N at position N.
+        foreach (var cell in Cells)
         {
-            var cell = Cells[slot.Column];
-            cell.ApplyCurrentCellState();
+            if (cell.Index == slot.Column)
+            {
+                cell.ApplyCurrentCellState();
+                return;
+            }
         }
     }
 

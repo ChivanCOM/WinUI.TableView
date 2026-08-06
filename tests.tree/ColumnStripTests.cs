@@ -105,8 +105,52 @@ public class ColumnStripTests
     }
 
     [Fact]
+    public void The_skipped_columns_become_the_inset_the_realized_cells_are_pushed_by()
+    {
+        // Scrolled to 400: columns 6, 7, 8 are on screen, so 2..5 were skipped. A row's cells panel
+        // stacks the four it built from its own left edge, and only this inset puts the first of
+        // them under its own header instead of under column 2's.
+        var range = ColumnStrip.VisibleRange(Widths, Frozen, horizontalOffset: 400, viewportWidth: 300, overscan: 0);
+        var (inset, hidden) = ColumnStrip.Geometry(Widths, Frozen, range);
+
+        Assert.Equal((6, 9), range);
+        Assert.Equal(400, inset);                                     // columns 2,3,4,5
+        Assert.Equal(inset, ColumnStrip.Slots(Widths, Frozen, range)[0].Offset);
+        Assert.Equal(500, hidden);                                    // 800 wide, 300 of it realized
+    }
+
+    [Fact]
+    public void The_realized_and_hidden_widths_add_back_up_to_the_whole_strip()
+    {
+        // What the row claims for itself is what it built plus what it did not, and that has to be
+        // the same number whether or not anything was virtualized away — otherwise turning it on
+        // shortens the scrollbar and the last column becomes unreachable.
+        double[] widths = [30, 250, 60, 400, 55, 120];
+        var full = ColumnStrip.ScrollableWidth(widths, frozenCount: 1);
+
+        foreach (var offset in new double[] { 0, 100, 400, 700, 5000 })
+        {
+            var range = ColumnStrip.VisibleRange(widths, 1, offset, viewportWidth: 200);
+            var (_, hidden) = ColumnStrip.Geometry(widths, 1, range);
+            var realized = ColumnStrip.Slots(widths, 1, range).Sum(s => s.Width);
+
+            Assert.Equal(full, realized + hidden);
+        }
+    }
+
+    [Fact]
+    public void Realizing_everything_leaves_nothing_to_inset_or_to_claim_back()
+    {
+        var (inset, hidden) = ColumnStrip.Geometry(Widths, Frozen, (Frozen, Widths.Length));
+
+        Assert.Equal(0, inset);
+        Assert.Equal(0, hidden);
+    }
+
+    [Fact]
     public void No_columns_at_all_is_an_empty_range_and_not_a_crash()
     {
+        Assert.Equal((0d, 0d), ColumnStrip.Geometry([], 0, (0, 0)));
         Assert.Equal((0, 0), ColumnStrip.VisibleRange([], 0, 0, 300));
         Assert.Empty(ColumnStrip.Slots([], 0, (0, 0)));
         Assert.Equal(0, ColumnStrip.ScrollableWidth([], 0));

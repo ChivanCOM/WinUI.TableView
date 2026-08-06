@@ -87,6 +87,11 @@ public sealed partial class VirtualHosterView : Grid
             CanFilterColumns = false,
             ShowExportOptions = false,
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+
+            // --vcols: build a row's cells only for the columns on screen. Every probe here runs
+            // both ways, because the point of the switch is that nothing else about the grid
+            // changes.
+            VirtualizeColumns = Environment.GetCommandLineArgs().Contains("--vcols"),
         };
         if (MusicPath is not null)
         {
@@ -1238,6 +1243,24 @@ public sealed partial class VirtualHosterView : Grid
             return;
         }
 
+        // --hdrag: the horizontal scrollbar under a thumb. Sideways scrolling in this grid is not a
+        // ScrollViewer moving — it is HorizontalOffset changing and every realized row re-arranging
+        // its cells against it — so it has its own cost, and its own probe.
+        if (Environment.GetCommandLineArgs().Contains("--hdrag"))
+        {
+            await HDragProbeAsync();
+            return;
+        }
+
+        // --resize: dragging a column's edge. The reported symptom is that the header strip comes
+        // out scrambled and only sorts itself out on a SECOND resize, which is the signature of a
+        // strip laid out against widths one pass out of date.
+        if (Environment.GetCommandLineArgs().Contains("--resize"))
+        {
+            await ResizeProbeAsync();
+            return;
+        }
+
         // --fling-loop: hop between two far-apart high offsets forever — a stable hot loop
         // for attaching a CPU profiler to the large-scroll path.
         if (Environment.GetCommandLineArgs().Contains("--fling-loop"))
@@ -1487,6 +1510,328 @@ public sealed partial class VirtualHosterView : Grid
         "File" => node.ColFile,
         _ => null,
     };
+
+    /// <summary>
+    /// A column being resized, and the header strip that has to follow it.
+    ///
+    /// <para>A drag is not one width change, it is one per pointer move, so this sets the width the
+    /// way the gripper does — repeatedly, then once more to a final value — and then asks the only
+    /// question that matters: does every header sit at the sum of the widths before it, and does
+    /// every cell sit under its own header. The "resize again and it fixes itself" part of the
+    /// report is why the check runs after the FIRST drag, before anything else touches layout.</para>
+    /// </summary>
+    /// <summary>
+    /// Dragging the horizontal scrollbar from one end of the columns to the other and back.
+    ///
+    /// <para>A thumb drag delivers a stream of small offset changes, the same way a trackpad
+    /// delivers a fling — and each one re-arranges every realized row. Under column virtualization
+    /// some of them also cross a column boundary, which is the step that costs: that is where rows
+    /// have to build cells they did not have. This measures both, and says how many of the steps
+    /// were boundary crossings, so a slow drag can be blamed on the right one.</para>
+    /// </summary>
+    private async Task HDragProbeAsync()
+    {
+        BuildSkeletonAndModel();
+        ScrollToOffset(0);
+        await SettleAsync();
+        _scrollViewer ??= FindScrollViewer(_table);
+
+        var notch = double.TryParse(ReadArg("--notch"), out var n) ? n : 24;
+        var span = _scrollViewer?.ScrollableWidth ?? 0;
+        if (span <= 0)
+        {
+            // The extent is the row width; if the grid is wider than its columns there is nothing
+            // to drag.
+            span = Math.Max(0, _table.Columns.VisibleColumns.Sum(c => c.ActualWidth) - _table.ActualWidth);
+        }
+
+        if (span <= 0)
+        {
+            Console.WriteLine("[hoster:hdrag] nothing to scroll sideways");
+            Finish(false);
+            return;
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var walls = new List<long>();
+        var gaps = new List<long>();
+        var last = sw.ElapsedMilliseconds;
+        var stalls = 0;
+        var crossings = 0;
+        long crossedWall = 0, plainWall = 0;
+        var lastRange = _table.ColumnRangeForDiagnostics;
+
+        long Ms(long ticks) => ticks * 1000 / System.Diagnostics.Stopwatch.Frequency;
+        long cellsAtStart = 0, arrangeAtStart = 0, listsAtStart = 0, syncAtStart = 0, measureAtStart = 0;
+        long syncTotal = 0, measureTotal = 0, arrangeTotal = 0, cellTotal = 0, cellPreTotal = 0;
+        long cellTicksAtStart = 0, cellPreAtStart = 0;
+        var worstStep = "";
+        long worstWall = -1;
+
+        // Out to the last column and back, at a thumb's rate. --span limits the travel, because
+        // nudging the grid a few columns is the gesture people actually make; sweeping it end to end
+        // is the worst case, not the common one.
+        if (double.TryParse(ReadArg("--span"), out var limit) && limit > 0)
+        {
+            span = Math.Min(span, limit);
+        }
+
+        var offsets = new List<double>();
+        var sweeps = int.TryParse(ReadArg("--sweeps"), out var sw2) ? sw2 : 1;
+        for (var s2 = 0; s2 < sweeps; s2++)
+        {
+            for (var x = 0d; x < span; x += notch) offsets.Add(x);
+            for (var x = span; x > 0; x -= notch) offsets.Add(x);
+        }
+
+        foreach (var x in offsets)
+        {
+            var t0 = sw.ElapsedMilliseconds;
+            var gap = t0 - last;
+            last = t0;
+
+            cellsAtStart = TableView.DiagCellMeasures;
+            arrangeAtStart = TableView.DiagRowArrangeTicks;
+            listsAtStart = TableView.DiagCellListBuilds;
+            syncAtStart = TableView.DiagColumnSyncTicks;
+            measureAtStart = TableView.DiagRowMeasureTicks;
+            cellTicksAtStart = TableView.DiagCellMeasureTicks;
+            cellPreAtStart = TableView.DiagCellPreMeasureTicks;
+
+            _table.SetValue(TableView.HorizontalOffsetProperty, x);
+            _table.UpdateLayout();
+
+            var wall = sw.ElapsedMilliseconds - t0;
+            syncTotal += TableView.DiagColumnSyncTicks - syncAtStart;
+            measureTotal += TableView.DiagRowMeasureTicks - measureAtStart;
+            arrangeTotal += TableView.DiagRowArrangeTicks - arrangeAtStart;
+            cellTotal += TableView.DiagCellMeasureTicks - cellTicksAtStart;
+            cellPreTotal += TableView.DiagCellPreMeasureTicks - cellPreAtStart;
+
+            var range = _table.ColumnRangeForDiagnostics;
+            var crossed = range != lastRange;
+            lastRange = range;
+
+            if (crossed)
+            {
+                crossings++;
+                crossedWall += wall;
+            }
+            else
+            {
+                plainWall += wall;
+            }
+
+            if (walls.Count > 2)
+            {
+                walls.Add(wall);
+                gaps.Add(gap);
+
+                if (gap >= 50)
+                {
+                    stalls++;
+                }
+
+                if (wall > worstWall)
+                {
+                    worstWall = wall;
+                    worstStep = $"x={x:F0} wall={wall}ms crossed={crossed} range={range} "
+                        + $"cellMeasures={TableView.DiagCellMeasures - cellsAtStart} "
+                        + $"syncMs={Ms(TableView.DiagColumnSyncTicks - syncAtStart)} "
+                        + $"rowMeasureMs={Ms(TableView.DiagRowMeasureTicks - measureAtStart)} "
+                        + $"arrangeMs={Ms(TableView.DiagRowArrangeTicks - arrangeAtStart)} "
+                        + $"cellLists={TableView.DiagCellListBuilds - listsAtStart}";
+                }
+            }
+            else
+            {
+                walls.Add(wall);
+                gaps.Add(gap);
+            }
+
+            await Task.Delay(16);
+        }
+
+        var sortedWalls = walls.OrderBy(v => v).ToList();
+        var sortedGaps = gaps.OrderBy(v => v).ToList();
+
+        Console.WriteLine($"[hoster:hdrag] steps={walls.Count} notch={notch:F0}px span={span:F0}px "
+            + $"crossings={crossings} crossedWallTotal={crossedWall}ms plainWallTotal={plainWall}ms "
+            + $"wallMedian={sortedWalls[sortedWalls.Count / 2]}ms "
+            + $"wallP99={sortedWalls[(int)(sortedWalls.Count * 0.99)]}ms wallWorst={sortedWalls[^1]}ms "
+            + $"wallTotal={walls.Sum()}ms "
+            + $"gapMedian={sortedGaps[sortedGaps.Count / 2]}ms gapWorst={sortedGaps[^1]}ms stalls>=50ms={stalls}");
+        Console.WriteLine($"[hoster:hdrag] where the time went: syncTotal={Ms(syncTotal)}ms "
+            + $"rowMeasureTotal={Ms(measureTotal)}ms rowArrangeTotal={Ms(arrangeTotal)}ms "
+            + $"cellMeasureTotal={Ms(cellTotal)}ms cellPreMeasureTotal={Ms(cellPreTotal)}ms");
+        Console.WriteLine($"[hoster:hdrag] worst step: {worstStep}");
+
+        var ok = sortedWalls[(int)(sortedWalls.Count * 0.99)] <= 16 && sortedWalls[^1] <= 50;
+        Console.WriteLine(ok
+            ? $"[hoster:hdrag] PASS — worst step {sortedWalls[^1]}ms"
+            : $"[hoster:hdrag] FAIL — worst step {sortedWalls[^1]}ms, p99 {sortedWalls[(int)(sortedWalls.Count * 0.99)]}ms");
+        Finish(ok);
+    }
+
+    private async Task ResizeProbeAsync()
+    {
+        await SettleAsync();
+
+        var failures = new List<string>();
+
+        // Scrolled sideways as well as at the start, and on a column near the front as well as one
+        // out in the middle: the report is of a strip that comes apart, and which of those it takes
+        // is the difference between "the widths were stale" and "the offsets were".
+        foreach (var offset in new double[] { 0, 600 })
+        {
+            foreach (var columnIndex in new[] { 1, 8 })
+            {
+                _table.SetValue(TableView.HorizontalOffsetProperty, offset);
+                _table.UpdateLayout();
+                await Task.Delay(150);
+
+                // The control: scrolled sideways, nothing resized. Anything wrong here is not the
+                // resize's doing.
+                foreach (var p in HeaderStripProblems($"x={offset:F0} col={columnIndex} (before any drag)"))
+                {
+                    Console.WriteLine($"[hoster:resize] BEFORE {p}");
+                }
+
+                // Two drags, because the symptom is that the first comes out wrong and the second
+                // hides it. Each is a burst of width changes, as a real gripper produces — and with
+                // no forced layout in between, because a gripper does not force one either.
+                for (var drag = 1; drag <= 2; drag++)
+                {
+                    var target = _table.Columns.VisibleColumns.ElementAtOrDefault(columnIndex);
+                    if (target is null)
+                    {
+                        continue;
+                    }
+
+                    var from = target.ActualWidth;
+                    var to = drag == 1 ? from + 120 : from - 60;
+
+                    for (var step = 1; step <= 8; step++)
+                    {
+                        target.Width = new GridLength(from + ((to - from) * step / 8.0), GridUnitType.Pixel);
+                        await Task.Delay(16);
+                    }
+
+                    // What the eye sees the moment the button comes up, before the debounced
+                    // desired-width pass has had its 250ms.
+                    await Task.Delay(80);
+                    var immediate = HeaderStripProblems($"x={offset:F0} col={columnIndex} drag {drag} (on release)");
+
+                    // And what is left once everything the drag kicked off has landed. A problem
+                    // that survives this is the one being reported.
+                    _table.UpdateLayout();
+                    await Task.Delay(500);
+                    var settled = HeaderStripProblems($"x={offset:F0} col={columnIndex} drag {drag} (settled)");
+
+                    foreach (var p in immediate.Where(p => !settled.Contains(p)))
+                    {
+                        Console.WriteLine($"[hoster:resize] TRANSIENT {p}");
+                    }
+
+                    failures.AddRange(settled);
+                }
+            }
+        }
+
+        Console.WriteLine($"[hoster:resize] {failures.Count} problems after two drags");
+        foreach (var f in failures.Take(12))
+        {
+            Console.WriteLine($"[hoster:resize] WRONG {f}");
+        }
+
+        var ok = failures.Count == 0;
+        Console.WriteLine(ok
+            ? "[hoster:resize] PASS — the header strip followed the resize"
+            : $"[hoster:resize] FAIL — {failures.Count} headers or cells landed off their column");
+        Finish(ok);
+    }
+
+    /// <summary>
+    /// Where every header actually sits against where the column widths say it should, and where
+    /// every realized cell sits against its own header.
+    /// </summary>
+    private List<string> HeaderStripProblems(string step)
+    {
+        var problems = new List<string>();
+        var visible = _table.Columns.VisibleColumns;
+
+        // Each header's left edge, in the strip's own coordinates: the widths of everything before
+        // it. A header that reports a different offset is a header the strip laid out stale.
+        var expected = new Dictionary<TableViewColumnHeader, double>();
+        var x = 0d;
+
+        foreach (var column in visible)
+        {
+            if (column.HeaderControl is { } header)
+            {
+                expected[header] = x;
+
+                if (Math.Abs(header.ActualWidth - column.ActualWidth) > 0.5)
+                {
+                    problems.Add($"{step}: header \"{column.Header}\" is {header.ActualWidth:F0} wide "
+                        + $"for a column of {column.ActualWidth:F0}");
+                }
+            }
+
+            x += column.ActualWidth;
+        }
+
+        // Offsets are read relative to the first header, so the frozen/scrollable split and the
+        // horizontal offset drop out and what is left is the strip's internal order and spacing.
+        var first = expected.Keys.FirstOrDefault();
+        if (first is null)
+        {
+            problems.Add($"{step}: no headers at all");
+            return problems;
+        }
+
+        var origin = first.TransformToVisual(_table).TransformPoint(new Windows.Foundation.Point(0, 0)).X;
+
+        var firstCell = RealizedRows().FirstOrDefault()?.Cells.FirstOrDefault();
+        var cellOrigin = firstCell?.TransformToVisual(_table).TransformPoint(new Windows.Foundation.Point(0, 0)).X;
+        Console.WriteLine($"[hoster:resize] {step}: offset={_table.HorizontalOffset:F0} "
+            + $"firstHeaderX={origin:F0} firstCellX={cellOrigin:F0} "
+            + $"headerRowScrolled={(origin - cellOrigin):F0}");
+
+        foreach (var (header, want) in expected)
+        {
+            var got = header.TransformToVisual(_table).TransformPoint(new Windows.Foundation.Point(0, 0)).X - origin;
+            if (Math.Abs(got - want) > 1.0)
+            {
+                problems.Add($"{step}: header \"{header.Column?.Header}\" sits at {got:F0}, "
+                    + $"widths say {want:F0}");
+            }
+        }
+
+        // And the cells under them: a strip that is right on its own but disagrees with the rows is
+        // the same bug seen from the other side.
+        foreach (var row in RealizedRows().Take(4))
+        {
+            foreach (var cell in row.Cells)
+            {
+                if (cell.Column?.HeaderControl is not { } header)
+                {
+                    continue;
+                }
+
+                var headerX = header.TransformToVisual(_table).TransformPoint(new Windows.Foundation.Point(0, 0)).X;
+                var cellX = cell.TransformToVisual(_table).TransformPoint(new Windows.Foundation.Point(0, 0)).X;
+
+                if (Math.Abs(headerX - cellX) > 1.0)
+                {
+                    problems.Add($"{step}: cell for \"{cell.Column?.Header}\" sits at {cellX:F0} "
+                        + $"under a header at {headerX:F0}");
+                }
+            }
+        }
+
+        return problems;
+    }
 
     private async Task FlickProbeAsync()
     {

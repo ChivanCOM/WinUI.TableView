@@ -246,6 +246,16 @@ public partial class TableView
     public static readonly DependencyProperty FrozenColumnCountProperty = DependencyProperty.Register(nameof(FrozenColumnCount), typeof(int), typeof(TableView), new PropertyMetadata(0, OnFrozenColumnCountChanged));
 
     /// <summary>
+    /// Identifies the VirtualizeColumns dependency property.
+    /// </summary>
+    public static readonly DependencyProperty VirtualizeColumnsProperty = DependencyProperty.Register(nameof(VirtualizeColumns), typeof(bool), typeof(TableView), new PropertyMetadata(false, OnVirtualizeColumnsChanged));
+
+    /// <summary>
+    /// Identifies the MaxColumnSyncRowsPerFrame dependency property.
+    /// </summary>
+    public static readonly DependencyProperty MaxColumnSyncRowsPerFrameProperty = DependencyProperty.Register(nameof(MaxColumnSyncRowsPerFrame), typeof(int), typeof(TableView), new PropertyMetadata(8));
+
+    /// <summary>
     /// Identifies the RowDetailsVisibilityMode dependency property.
     /// </summary>
     public static readonly DependencyProperty RowDetailsVisibilityModeProperty = DependencyProperty.Register(nameof(RowDetailsVisibilityMode), typeof(TableViewRowDetailsVisibilityMode), typeof(TableView), new PropertyMetadata(TableViewRowDetailsVisibilityMode.VisibleWhenExpanded, OnRowDetailsVisibilityModeChanged));
@@ -847,6 +857,33 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets whether a row builds cells only for the columns that are on screen.
+    ///
+    /// <para>Off by default. A grid with more columns than fit in the viewport spends most of the
+    /// work of realizing a row on cells behind its right-hand edge; turning this on leaves those
+    /// unbuilt until they are scrolled to. Frozen columns are never virtualized away.</para>
+    /// </summary>
+    public bool VirtualizeColumns
+    {
+        get => (bool)GetValue(VirtualizeColumnsProperty);
+        set => SetValue(VirtualizeColumnsProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets how many rows may build cells for a newly-scrolled-to column in one frame, with
+    /// the rest carried into the next. Zero does them all at once.
+    ///
+    /// <para>Only applies when <see cref="VirtualizeColumns"/> is on. Crossing a column boundary
+    /// gives every row on screen a cell to build; done in one go that is a dropped frame, and a
+    /// horizontal drag crosses a boundary every column width.</para>
+    /// </summary>
+    public int MaxColumnSyncRowsPerFrame
+    {
+        get => (int)GetValue(MaxColumnSyncRowsPerFrameProperty);
+        set => SetValue(MaxColumnSyncRowsPerFrameProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets the visibility mode of the row details.
     /// </summary>
     public TableViewRowDetailsVisibilityMode RowDetailsVisibilityMode
@@ -1151,6 +1188,11 @@ public partial class TableView
     {
         if (d is TableView { _headerRow: { } } tableView)
         {
+            // Before the rows are told to re-arrange: a scroll that crossed a column boundary
+            // changes which cells they hold, and re-arranging the old set first would put a frame's
+            // worth of cells under the wrong headers.
+            tableView.UpdateColumnRange();
+
             tableView._headerRow.InvalidateArrange();
 
             foreach (var row in tableView._rows)
@@ -1213,6 +1255,7 @@ public partial class TableView
         {
             tableView.SetValue(HorizontalOffsetProperty, 0d);
             tableView.UpdateHorizontalScrollBarMargin();
+            tableView.QueueColumnRangeUpdate();   // which columns never scroll away just changed
 
             if (tableView.Columns is TableViewColumnsCollection columnsCollection)
             {

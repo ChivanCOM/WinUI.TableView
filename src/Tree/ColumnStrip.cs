@@ -120,6 +120,35 @@ public static class ColumnStrip
         return slots;
     }
 
+    /// <summary>
+    /// What a row's layout needs once the range is known: how far right the realized cells have to
+    /// be pushed, and how much width the row still has to claim for the ones it did not build.
+    /// </summary>
+    /// <returns>
+    /// <c>Inset</c> — the summed width of the scrollable columns before the range, which is where
+    /// the panel holding the realized cells starts. <c>Hidden</c> — the summed width of every
+    /// column outside the range, which the row adds to its own so the horizontal scrollbar still
+    /// describes the whole strip.
+    /// </returns>
+    public static (double Inset, double Hidden) Geometry(
+        IReadOnlyList<double> widths, int frozenCount, (int Start, int End) range)
+    {
+        var count = widths?.Count ?? 0;
+        var frozen = Math.Clamp(frozenCount, 0, count);
+        var start = Math.Clamp(range.Start, frozen, count);
+        var end = Math.Clamp(range.End, start, count);
+
+        var inset = 0d;
+        for (var i = frozen; i < start; i++)
+            inset += Width(widths![i]);
+
+        var realized = 0d;
+        for (var i = start; i < end; i++)
+            realized += Width(widths![i]);
+
+        return (inset, Math.Max(0, ScrollableWidth(widths!, frozen) - realized));
+    }
+
     /// <summary>The scrollable strip's full width — the extent a scrollbar is sized against, which
     /// must count every column and not only the realized ones.</summary>
     public static double ScrollableWidth(IReadOnlyList<double> widths, int frozenCount)

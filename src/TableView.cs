@@ -2947,7 +2947,22 @@ public partial class TableView : ListView
     /// </summary>
     internal TableViewCell? GetCellFromSlot(TableViewCellSlot slot)
     {
-        return slot.IsValid(this) && ContainerFromIndex(slot.Row) is TableViewRow row ? row.Cells[slot.Column] : default;
+        if (!slot.IsValid(this) || ContainerFromIndex(slot.Row) is not TableViewRow row)
+        {
+            return default;
+        }
+
+        // By the cell's own column index rather than its position: frozen cells come first in the
+        // list, and under column virtualization the ones off screen are not in it at all.
+        foreach (var cell in row.Cells)
+        {
+            if (cell.Index == slot.Column)
+            {
+                return cell;
+            }
+        }
+
+        return default;
     }
 
     /// <summary>

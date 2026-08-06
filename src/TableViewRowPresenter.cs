@@ -121,7 +121,18 @@ public partial class TableViewRowPresenter : Control
             _rowHeader.InvalidateMeasure();
         }
 
-        return base.MeasureOverride(availableSize);
+        var size = base.MeasureOverride(availableSize);
+
+        // A row that built only the cells on screen is narrower than the grid it belongs to, and the
+        // ScrollViewer's extent — which is what gives the horizontal scrollbar its range — is the
+        // widest thing inside it. Report the width the row WOULD have, so scrolling right still
+        // reaches the last column.
+        if (CellsHiddenWidth > 0)
+        {
+            size.Width += CellsHiddenWidth;
+        }
+
+        return size;
     }
 
     /// <inheritdoc/>
@@ -173,6 +184,12 @@ public partial class TableViewRowPresenter : Control
             {
                 var frozenRight = _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
                 xScroll += frozenRight;
+
+                // The panel holds only the realized cells and stacks them from its own left edge, so
+                // the columns that were skipped are an inset: without it the first realized cell
+                // would sit under the first scrollable header instead of under its own.
+                xScroll += CellsInset;
+                xClip = Math.Max(0, xClip - CellsInset);
 
                 _scrollableCellsPanel.Arrange(new(xScroll, 0, _scrollableCellsPanel.ActualWidth, _scrollableCellsPanel.ActualHeight));
 
@@ -443,10 +460,16 @@ public partial class TableViewRowPresenter : Control
         }
 
         var visible = TableView.Columns.VisibleColumns;
+        var order = visible.IndexOf(column);
+
+        // Counted against the cells that are actually IN the panel, not against every column that
+        // comes before this one. Under column virtualization those are not the same number, and
+        // clamping the second one to the child count put a re-realized cell on the wrong side of
+        // its neighbour whenever a range grew leftwards.
         var index = 0;
-        for (var i = 0; i < visible.Count && visible[i] != column; i++)
+        for (var i = 0; i < panel.Children.Count; i++)
         {
-            if (visible[i].IsFrozen == column.IsFrozen)
+            if (panel.Children[i] is TableViewCell { } sibling && sibling.Index < order)
             {
                 index++;
             }
@@ -511,6 +534,21 @@ public partial class TableViewRowPresenter : Control
             }
         }
     }
+
+    /// <summary>
+    /// The geometry of the cell set this row is holding RIGHT NOW: how far its cells panel is
+    /// pushed right by the columns it skipped, and how much width it claims for the columns it did
+    /// not build.
+    ///
+    /// <para>Per row, not read from the grid, because the rows do not all take on a new column range
+    /// in the same frame — the work of doing so is spread over several. A row that arranged against
+    /// a range whose cells it had not built yet would put every cell it does hold a column out of
+    /// place.</para>
+    /// </summary>
+    internal double CellsInset { get; set; }
+
+    /// <inheritdoc cref="CellsInset"/>
+    internal double CellsHiddenWidth { get; set; }
 
     /// <summary>
     /// Clears all cells from the presenter.
