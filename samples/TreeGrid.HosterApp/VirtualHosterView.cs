@@ -1199,6 +1199,13 @@ public sealed partial class VirtualHosterView : Grid
             return;
         }
 
+        // --hscroll: the right value under the right header, at every horizontal position.
+        if (Environment.GetCommandLineArgs().Contains("--hscroll"))
+        {
+            await HScrollProbeAsync();
+            return;
+        }
+
         // --flick: the trackpad gesture itself — a decaying burst of small scrolls — through the
         // grid's own wheel path, with --cap N rows/frame to measure the scroll cap.
         if (Environment.GetCommandLineArgs().Contains("--flick"))
@@ -1362,6 +1369,125 @@ public sealed partial class VirtualHosterView : Grid
     /// list a row at a time instead of jumping. Drives the grid's own wheel path so the scroll cap
     /// (<see cref="TableView.MaxScrollRowsPerFrame"/>) is measured exactly as a hand would meet it.
     /// </summary>
+    /// <summary>
+    /// The check column virtualization has to survive: at every horizontal position, is the value
+    /// under a header the value that BELONGS under it?
+    ///
+    /// <para>Realizing only the columns on screen means a row's cells no longer run 0..N in step
+    /// with the columns, so every way of finding "the cell for this column" that quietly assumed
+    /// they did is now a wrong-data bug — the worst kind here, because the grid still looks right.
+    /// This walks right across the strip and back, twice, and reads every realized cell's text
+    /// against what its own column says that row should show.</para>
+    /// </summary>
+    private async Task HScrollProbeAsync()
+    {
+        if (_music is null)
+        {
+            Console.WriteLine("[hoster:hscroll] needs --music");
+            Finish(false);
+            return;
+        }
+
+        await SettleAsync();
+        _scrollViewer ??= FindScrollViewer(_table);
+        if (_scrollViewer is not { } sv)
+        {
+            Console.WriteLine("[hoster:hscroll] no ScrollViewer");
+            Finish(false);
+            return;
+        }
+
+        var failures = new List<string>();
+        var checkedCells = 0;
+        var offsets = new double[] { 0, 200, 700, 1500, 2400, 900, 0, 1500, 0 };
+
+        // Down the list as well as across it: a cell realized at one vertical position and recycled
+        // to another is where a stale column mapping shows up.
+        foreach (var top in new double[] { 0, 3000 })
+        {
+            sv.ChangeView(null, top, null, disableAnimation: true);
+            await SettleAsync();
+
+            foreach (var x in offsets)
+            {
+                sv.ChangeView(x, null, null, disableAnimation: true);
+                _table.UpdateLayout();
+                await Task.Delay(120);
+                await SettleAsync();
+
+                foreach (var row in RealizedRows())
+                {
+                    if (row.DataContext is not DemoNode node || node.Name is "…")
+                    {
+                        continue;   // a placeholder owes nothing
+                    }
+
+                    foreach (var cell in row.Cells)
+                    {
+                        if (cell.Column is not TableViewTextColumn column
+                            || cell.Content is not TextBlock text)
+                        {
+                            continue;   // template and tree columns are checked by --paint
+                        }
+
+                        var expected = ExpectedFor(node, column.Header?.ToString() ?? "");
+                        if (expected is null)
+                        {
+                            continue;
+                        }
+
+                        checkedCells++;
+                        if (text.Text != expected)
+                        {
+                            failures.Add($"top={top:F0} x={x:F0} \"{column.Header}\" showed "
+                                + $"\"{text.Text}\" for a row whose value is \"{expected}\"");
+                        }
+                    }
+                }
+            }
+        }
+
+        Console.WriteLine($"[hoster:hscroll] checked {checkedCells} cells across "
+            + $"{offsets.Length * 2} positions, {failures.Count} wrong");
+        foreach (var f in failures.Take(8))
+        {
+            Console.WriteLine($"[hoster:hscroll] WRONG {f}");
+        }
+
+        var ok = failures.Count == 0 && checkedCells > 0;
+        Console.WriteLine(ok
+            ? $"[hoster:hscroll] PASS — every realized cell showed its own column's value"
+            : $"[hoster:hscroll] FAIL — {failures.Count} cells showed another column's value "
+                + $"(or nothing was checked: {checkedCells})");
+        Finish(ok);
+    }
+
+    /// <summary>What the row should be showing under a given header, or null for a header this
+    /// check does not know about.</summary>
+    private static string? ExpectedFor(DemoNode node, string header) => header switch
+    {
+        "Folder" => node.ColFolder,
+        "Title" => node.ColTitle,
+        "Artist" => node.ColArtist,
+        "Album" => node.ColAlbum,
+        "Album artist" => node.ColAlbumArtist,
+        "#" => node.ColTrack,
+        "Disc" => node.ColDisc,
+        "Disc title" => node.ColDiscTitle,
+        "Year" => node.ColYear,
+        "Genre" => node.ColGenre,
+        "Length" => node.ColLength,
+        "Kind" => node.ColKind,
+        "Codec" => node.ColCodec,
+        "Bitrate" => node.ColBitrate,
+        "Sample rate" => node.ColSampleRate,
+        "Bit depth" => node.ColBitDepth,
+        "Channels" => node.ColChannels,
+        "Size" => node.ColSize,
+        "File" => node.ColFile,
+        _ => null,
+    };
+
     private async Task FlickProbeAsync()
     {
         var cap = double.TryParse(ReadArg("--cap"), out var c) ? c : 0;
