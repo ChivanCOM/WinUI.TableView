@@ -188,6 +188,15 @@ public partial class TableView : ListView
     public static long DiagInsertCellScans;
 
     /// <summary>
+    /// What the last <see cref="ScrollRowIntoView"/> decided and what it decided it from — the row
+    /// asked for, the offset arithmetic, and whether it jumped, declined, or was clamped short.
+    ///
+    /// <para>Reading this after a reveal is the difference between "the grid walked" and "the grid
+    /// jumped to the wrong place": both leave the same stack. Set by <see cref="JumpToRow"/>.</para>
+    /// </summary>
+    public static string DiagLastJump = "";
+
+    /// <summary>
     /// Watches for frames that never came. A timer ticking every few milliseconds cannot tick while
     /// the thread is blocked, so a late tick measures the block exactly — and the counters above say
     /// what the thread was doing while it held on.
@@ -1635,8 +1644,93 @@ public partial class TableView : ListView
         }
     }
 
+    /// <summary>
+    /// What one row occupies, for turning a row index into a scroll offset.
+    ///
+    /// <para>From the panel's OWN extent first, because that is what the offset is being aimed at:
+    /// a caller wants to land where the panel will put the row, and the panel places rows against
+    /// the extent it is publishing, not against any row's measurement. Sampling one container
+    /// instead is off by whatever that container includes and the placement does not — a 22px grid
+    /// laid out at 23px per row samples a row at 23, adds the customary border, and aims at 24,
+    /// which is a row of drift for every row above the target (measured: 12,000px, ~520 rows, on a
+    /// restore twelve thousand rows down).</para>
+    ///
+    /// <para>The measured row and then <see cref="RowHeight"/> are the fallbacks, for before there
+    /// is an extent to read, and for while the extent is still an underestimate — a panel part-way
+    /// through its first fill publishes an extent worth a few screens, and dividing that by the
+    /// whole count gives a pitch shorter than a row, which would aim every offset near the top. A
+    /// pitch below the grid's own row height is the tell.</para>
+    ///
+    /// <para>A grid with mixed row heights gets an average out of this and should provide
+    /// <see cref="RowOffsetOfIndex"/>, which is exact.</para>
+    /// </summary>
+    private double EstimatedRowPitch()
+    {
+        var count = Items?.Count ?? 0;
+        if (count > 0 && _scrollViewer is { ExtentHeight: > 0 } sv)
+        {
+            var fromExtent = sv.ExtentHeight / count;
+            if (double.IsNaN(RowHeight) || fromExtent >= RowHeight)
+            {
+                return fromExtent;
+            }
+        }
+
+        return _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1
+               ?? (double.IsNaN(RowHeight) ? 41 : RowHeight + 1);
+    }
+
+    /// <summary>Set between asking for a restore and the restore running, so the several signals
+    /// that all mean "the rebuild moved on" queue one attempt between them and not one each.</summary>
+    private bool _unoRestoreQueued;
+
+    /// <summary>
+    /// Asks for a restore attempt, on a turn of the loop of its own.
+    ///
+    /// <para>Both of the signals this rides arrive with a layout pass on the stack: a container
+    /// prepare happens inside the panel's fill, and a view change is raised from inside the pass
+    /// that changed the view. Moving the scroll offset from either one moves it underneath a fill
+    /// in flight, and that fill does not start again at the new place — it carries on, walking
+    /// every row between the two, building a container and a template for each. Over a screen
+    /// nobody notices. Over a rebuild that restores a reader twelve thousand rows down, or a reveal
+    /// that follows a re-filed track to the far end of a queue, it is a measure pass that does not
+    /// return: measured at 429 MB/s of template garbage, half of every second in collections, and
+    /// an audio buffer emptying because of it.</para>
+    ///
+    /// <para>So the attempt is posted instead. The restore is not losing anything by waiting: it
+    /// re-arms on every prepare and every view change, and the one it takes is the one where the
+    /// panel is between passes and a move is a jump.</para>
+    /// </summary>
     private void TryUnoReanchorRestore()
     {
+        if (_scrollViewer is null)
+        {
+            _unoReanchorPending = false;
+            return;
+        }
+
+        if (_unoRestoreQueued)
+        {
+            return;
+        }
+
+        _unoRestoreQueued = true;
+        if (DispatcherQueue?.TryEnqueue(RunUnoReanchorRestore) is not true)
+        {
+            // No queue to post to — better a restore that risks the walk than no restore at all.
+            RunUnoReanchorRestore();
+        }
+    }
+
+    private void RunUnoReanchorRestore()
+    {
+        _unoRestoreQueued = false;
+
+        if (!_unoReanchorPending)
+        {
+            return;
+        }
+
         if (_scrollViewer is not { } sv)
         {
             _unoReanchorPending = false;
@@ -1660,7 +1754,7 @@ public partial class TableView : ListView
             return;
         }
 
-        var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? 41;
+        var pitch = EstimatedRowPitch();
         // Mixed row heights (RowHeightSelector) make index × pitch wrong by the accumulated
         // difference above the anchor — the host's offset function is exact where provided.
         var target = RowOffsetOfIndex?.Invoke(anchorIndex) ?? anchorIndex * pitch;
@@ -2859,23 +2953,44 @@ public partial class TableView : ListView
     /// <returns><see langword="true"/> if the viewport was moved there; <see langword="false"/> when
     /// the row is near enough that the panel's own fill is both cheap and exact, and the caller
     /// should use that instead.</returns>
-    private bool JumpToRow(int index)
+    /// <summary>Whether a row is far enough off that reaching it means moving the offset rather
+    /// than letting the panel fill towards it — the same boundary <see cref="JumpToRow"/> draws,
+    /// asked before anything moves.</summary>
+    private bool IsFarFromViewport(int index)
     {
         if (index < 0 || _scrollViewer is not { } sv || sv.ViewportHeight <= 0)
         {
             return false;
         }
 
-        var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1
-                    ?? (double.IsNaN(RowHeight) ? 41 : RowHeight + 1);
+        var pitch = EstimatedRowPitch();
+        var top = RowOffsetOfIndex?.Invoke(index) ?? index * pitch;
+
+        return top <= sv.VerticalOffset - sv.ViewportHeight
+               || top + pitch >= sv.VerticalOffset + (sv.ViewportHeight * 2);
+    }
+
+    private bool JumpToRow(int index)
+    {
+        if (index < 0 || _scrollViewer is not { } sv || sv.ViewportHeight <= 0)
+        {
+            DiagLastJump = $"index={index} declined=no-viewport";
+            return false;
+        }
+
+        var pitch = EstimatedRowPitch();
 
         var top = RowOffsetOfIndex?.Invoke(index) ?? index * pitch;
         var bottom = top + pitch;
+
+        var state = $"index={index} pitch={pitch:F0} top={top:F0} offset={sv.VerticalOffset:F0} "
+            + $"viewport={sv.ViewportHeight:F0} extent={sv.ExtentHeight:F0} scrollable={sv.ScrollableHeight:F0}";
 
         // Already on screen: nothing to do, and this is asked on every change that MIGHT have moved
         // a row.
         if (top >= sv.VerticalOffset && bottom <= sv.VerticalOffset + sv.ViewportHeight)
         {
+            DiagLastJump = state + " decision=already-visible";
             return true;
         }
 
@@ -2884,15 +2999,19 @@ public partial class TableView : ListView
         if (top > sv.VerticalOffset - sv.ViewportHeight &&
             bottom < sv.VerticalOffset + (sv.ViewportHeight * 2))
         {
+            DiagLastJump = state + " decision=declined-near";
             return false;
         }
 
         // The least travel that shows it: from above, its top; from below, its bottom against the
         // bottom edge. Landing it in the middle would move the reader further than they asked.
         var target = top < sv.VerticalOffset ? top : bottom - sv.ViewportHeight;
+        var moved = Math.Clamp(target, 0, Math.Max(0, sv.ScrollableHeight));
 
-        sv.ChangeView(null, Math.Clamp(target, 0, Math.Max(0, sv.ScrollableHeight)), null,
-                      disableAnimation: true);
+        DiagLastJump = state + $" target={target:F0} moved={moved:F0}"
+            + (Math.Abs(moved - target) > 1 ? " decision=jumped-CLAMPED" : " decision=jumped");
+
+        sv.ChangeView(null, moved, null, disableAnimation: true);
         return true;
     }
 
@@ -2953,6 +3072,37 @@ public partial class TableView : ListView
     public async Task<TableViewRow?> ScrollRowIntoView(int index)
     {
         if (_scrollViewer is null || index < 0) return default!;
+
+#if !WINDOWS
+        // A LONG reveal asked for in the same turn as a rebuild — which is exactly what following a
+        // row that a rebuild MOVED looks like — moves the offset before the panel has laid out
+        // against the new collection. The fill that is then in flight does not start again at the
+        // new place, it walks to it, a container and a template per row passed; over a queue of
+        // tens of thousands that is a measure pass that does not return. One turn of the loop is
+        // all it takes for the move to be a jump again.
+        //
+        // Only for the long ones. A reveal of the row below the last one is what arrow keys do, and
+        // spending a frame on each of those to guard against a walk of two rows would cost more
+        // than it saves.
+        if (IsFarFromViewport(index))
+        {
+            // The restore a rebuild arms is dropped on the way past: it exists to keep a reader who
+            // asked for nothing where they were, and this reader has asked for something. Leaving
+            // it armed sets the two of them pulling the viewport in opposite directions. Whether it
+            // has been armed yet does not matter — a caller that rebuilds and reveals in one turn
+            // gets here before the rebind does.
+            _unoReanchorPending = false;
+            _unoReanchorCandidates.Clear();
+
+            var settled = new TaskCompletionSource();
+            if (DispatcherQueue?.TryEnqueue(() => settled.TrySetResult()) is true)
+            {
+                await settled.Task;
+            }
+
+            if (_scrollViewer is null || index >= Items.Count) return default!;
+        }
+#endif
 
         var item = Items[index];
         // FIX D: keep the caller's index — it is already valid (guarded above). On a virtualized
