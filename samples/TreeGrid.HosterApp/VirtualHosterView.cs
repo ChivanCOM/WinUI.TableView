@@ -570,6 +570,294 @@ public sealed partial class VirtualHosterView : Grid
         Finish(ok);
     }
 
+    // ── the hang, as the app performs it ──────────────────────────────────────────────────────
+    //
+    // Three probes above touch a piece of this: --filter does the Reset, --reanchor does the
+    // rebuild, --fling does the long travel. None of them hangs, and the app does. The app does
+    // all three in one dispatcher pass, with no layout in between: recognition writes the new
+    // names to the store, rebuilds the skeleton under the SAME search, then asks the grid to
+    // follow the row to wherever it landed. That whole pass is what this reproduces.
+
+    /// <summary>How long the UI thread may go silent before the run is called hung.</summary>
+    private static readonly int HangMs =
+        int.TryParse(ReadArg("--hang-ms"), out var hm) && hm > 0 ? hm : 6000;
+
+    /// <summary>The last moment the UI thread was seen alive, as ticks. Written by a timer on the
+    /// UI thread, read by a watchdog that is not on it — a timer cannot report the block it is
+    /// stuck behind, which is exactly the failure being chased.</summary>
+    private long _beat;
+
+    /// <summary>The last offsets the UI thread was seen at, newest last. Where the viewport was
+    /// GOING when it stopped answering is the whole question: a jump shows two samples far apart,
+    /// a walk shows a steady crawl.</summary>
+    private readonly Queue<string> _beatOffsets = new();
+
+    private void StartHangWatch(Func<string> diagnose)
+    {
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(100);
+        timer.Tick += (_, _) =>
+        {
+            Volatile.Write(ref _beat, Environment.TickCount64);
+            lock (_beatOffsets)
+            {
+                _beatOffsets.Enqueue($"{_scrollViewer?.VerticalOffset ?? -1:F0}");
+                while (_beatOffsets.Count > 12)
+                    _beatOffsets.Dequeue();
+            }
+        };
+        Volatile.Write(ref _beat, Environment.TickCount64);
+        timer.Start();
+
+        var thread = new Thread(() =>
+        {
+            while (true)
+            {
+                Thread.Sleep(250);
+                var silent = Environment.TickCount64 - Volatile.Read(ref _beat);
+                if (silent < HangMs)
+                    continue;
+
+                // Everything below reads fields, not the visual tree: the UI thread is inside a
+                // layout pass and touching an element from here would deadlock or lie.
+                Console.WriteLine($"[hoster:refile] HANG — the UI thread has not ticked for {silent}ms");
+                Console.WriteLine($"[hoster:refile] {diagnose()}");
+                lock (_beatOffsets)
+                    Console.WriteLine($"[hoster:refile] last offsets: {string.Join(" ", _beatOffsets)}");
+                Console.WriteLine($"[hoster:refile] jump: {TableView.DiagLastJump}");
+                Console.WriteLine($"[hoster:refile] prepares={TableView.DiagPrepares} reads={VirtualTreeModel.DiagReads}");
+                Console.WriteLine("[hoster:refile] FAIL — the reveal did not return");
+                Console.Out.Flush();
+                Environment.Exit(2);
+            }
+        })
+        { IsBackground = true };
+        thread.Start();
+    }
+
+    /// <summary>
+    /// The reported hang, performed the way the app performs it: filter the queue down, recognise
+    /// one track so that it re-files to a different place in the tree, rebuild the skeleton under
+    /// the same filter, and follow the row to where it went — all in one dispatcher pass.
+    ///
+    /// <para>The point of the run is the log, not the verdict. Either the grid jumps and the pass
+    /// returns (and the hang is somewhere the app does something this does not), or it does not
+    /// return — and the line printed for the jump says whether it declined to jump, or jumped to a
+    /// clamped offset because the extent of a just-Reset panel is not the extent of the list.</para>
+    /// </summary>
+    private async Task RefileProbeAsync()
+    {
+        if (_music is null)
+        {
+            Console.WriteLine("[hoster:refile] needs --music");
+            Finish(false);
+            return;
+        }
+
+        var term = ReadArg("--term") ?? "a";
+        var reveal = !Environment.GetCommandLineArgs().Contains("--noreveal");
+
+        await SettleAsync();
+        _scrollViewer ??= FindScrollViewer(_table);
+        if (_scrollViewer is not { } sv)
+        {
+            Console.WriteLine("[hoster:refile] no ScrollViewer");
+            Finish(false);
+            return;
+        }
+
+        var phase = "start";
+        StartHangWatch(() => $"phase={phase} rows={_source.Count} offset={sv.VerticalOffset:F0} "
+            + $"extent={sv.ExtentHeight:F0} scrollable={sv.ScrollableHeight:F0}");
+
+        // 1. The filter. One SetRoots, not one per keystroke: --filter already measures the typing,
+        //    and what matters here is the tree the reveal happens in.
+        phase = "filter";
+        var filtered = FilteredRoots(term);
+        _model.SetRoots(filtered);
+        await Task.Delay(200);
+        await SettleAsync();
+        Console.WriteLine($"[hoster:refile] filtered \"{term}\" to {_source.Count} rows "
+            + $"({_model.Count} in the model), extent={sv.ExtentHeight:F0}");
+
+        // 2. Where the reader is sitting — <c>--park N</c>, in rows. It is not scene-setting: the
+        //    rebuild re-anchors to this place while the reveal is travelling to another, and how far
+        //    apart the two are is how far the viewport is dragged back and forth.
+        phase = "park";
+        var park = int.TryParse(ReadArg("--park"), out var p) ? p : 40;
+        // The panel's own pitch, not the row height: what the grid must aim at to land on a row is
+        // whatever the extent it publishes says a row occupies.
+        var pitch = sv.ExtentHeight / Math.Max(1, _source.Count);
+        sv.ChangeView(null, Math.Min(park * pitch, Math.Max(0, sv.ScrollableHeight)), null, true);
+        await Task.Delay(200);
+        await SettleAsync();
+        var parked = sv.VerticalOffset;
+        Console.WriteLine($"[hoster:refile] parked at {parked:F0} (pitch {pitch:F2}) showing \"{TopVisibleName()}\"");
+
+        // 3. Recognition: the track gets the names the service came back with, and those names put
+        //    it under a different artist entirely — the far end of the tree, which is the travel
+        //    the app's reveal has to cover. It keeps its title, so the filter still holds it.
+        if (PickRefileTarget(filtered, term) is not ({ } track, { } toArtist, { } toAlbum))
+        {
+            Console.WriteLine($"[hoster:refile] nothing in \"{term}\" to move — try another --term");
+            Finish(false);
+            return;
+        }
+
+        // --nomove: rebuild without re-tagging anything, so the rebuild is the only thing left in
+        // the pass. The rows come back identical, as all-new objects.
+        if (Environment.GetCommandLineArgs().Contains("--nomove"))
+        {
+            Console.WriteLine($"[hoster:refile] nothing re-filed — the rebuild alone (\"{track.DisplayName}\" stays put)");
+        }
+        else
+        {
+            var was = $"{track.GroupArtist} / {track.GroupAlbum}";
+            track.AlbumArtist = toArtist;
+            track.Artist = toArtist;
+            track.Album = toAlbum;
+            _music = MusicLibrary.From(_music.Tracks);
+            Console.WriteLine($"[hoster:refile] \"{track.DisplayName}\" re-filed: {was} -> {toArtist} / {toAlbum}");
+        }
+
+        // 4. The pass the app runs: rebuild under the same search, find the row, go to it. No await
+        //    between them — the app has none either, so the grid is asked to reveal a row into a
+        //    panel that has not laid out since the Reset.
+        phase = "rebuild+reveal";
+        var prepares0 = TableView.DiagPrepares;
+        var pass = System.Diagnostics.Stopwatch.StartNew();
+
+        _model.SetRoots(FilteredRoots(term));
+
+        var index = LocateRefiled(track);
+        var rebuildMs = pass.ElapsedMilliseconds;
+        Console.WriteLine($"[hoster:refile] rebuilt to {_source.Count} rows in {rebuildMs}ms, "
+            + $"the row is now at {index} (offset {sv.VerticalOffset:F0}, "
+            + $"extent {sv.ExtentHeight:F0}, scrollable {sv.ScrollableHeight:F0})");
+
+        if (index < 0)
+        {
+            Console.WriteLine("[hoster:refile] the rebuilt tree does not hold the row — the filter dropped it");
+            Finish(false);
+            return;
+        }
+
+        if (reveal)
+        {
+            await _table.ScrollRowIntoView(index);
+        }
+        var revealMs = pass.ElapsedMilliseconds;
+
+        phase = "settle";
+        await Task.Delay(200);
+        await SettleAsync();
+
+        var prepares = TableView.DiagPrepares - prepares0;
+        Console.WriteLine($"[hoster:refile] jump: {TableView.DiagLastJump}");
+        Console.WriteLine($"[hoster:refile] passMs={pass.ElapsedMilliseconds} rebuildMs={rebuildMs} "
+            + $"revealMs={revealMs - rebuildMs} prepares={prepares} "
+            + $"offset={sv.VerticalOffset:F0} extent={sv.ExtentHeight:F0} top=\"{TopVisibleName()}\"");
+
+        // A jump builds viewports — a few of them across a Reset, a restore and the hop that ends
+        // it. A walk builds every row it passes, which at this distance is thousands. Twelve
+        // viewports separates the two by an order of magnitude either way.
+        var viewportRows = (int)Math.Ceiling(sv.ViewportHeight / QueueRowHeight) + 4;
+        var walked = prepares > viewportRows * 12;
+
+        // Where the pass was supposed to end: on the row that moved when the grid was asked to
+        // follow it, and back on the reader's own row when it was not.
+        var want = reveal ? index * pitch : parked;
+        var landed = Math.Abs(sv.VerticalOffset - want) < sv.ViewportHeight;
+        var ok = !walked && landed;
+
+        Console.WriteLine(ok
+            ? $"[hoster:refile] PASS — {prepares} rows built, and the viewport ended at {sv.VerticalOffset:F0} "
+                + (reveal ? $"on the row that moved (index {index})" : "back on the reader's row")
+            : walked
+                ? $"[hoster:refile] FAIL — {prepares} rows built to travel {Math.Abs(want):F0}px; it walked"
+                : $"[hoster:refile] FAIL — the viewport ended at {sv.VerticalOffset:F0}, not {want:F0}");
+        Finish(ok);
+    }
+
+    /// <summary>The track to recognise and the shelf it turns out to belong on: a row on screen
+    /// that the filter holds by its TITLE (so re-tagging it cannot drop it out of the tree), and
+    /// the last artist and album in the filtered collection — the longest travel there is.
+    ///
+    /// <para>Against the skeleton the grid is SHOWING, not a fresh one: building another would
+    /// re-point <see cref="_musicLeaves"/> at album nodes the live model has never heard of, and
+    /// every page it then asked for would come back empty.</para></summary>
+    private (MusicTrack Track, string Artist, string Album)? PickRefileTarget(
+        List<DemoNode> filtered, string term)
+    {
+        if (filtered.Count == 0)
+            return null;
+
+        var last = filtered[^1];
+        if (last.Children.Count == 0 || last.GroupArtist is not { } toArtist
+            || last.Children[^1].GroupAlbum is not { } toAlbum)
+            return null;
+
+        // A row the reader can SEE, because that is the only row they can ask to be recognised —
+        // and it is what puts the place they are sitting and the place the row goes at opposite
+        // ends of the list. By title, so the rebuild under the same term still holds it.
+        foreach (var row in RealizedRows())
+        {
+            if (row.DataContext is DemoNode { Track: { } onScreen }
+                && onScreen.DisplayName.Contains(term, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(onScreen.GroupArtist, toArtist, StringComparison.OrdinalIgnoreCase))
+                return (onScreen, toArtist, toAlbum);
+        }
+
+        // Nothing on screen qualifies — take the first that does, from the top.
+        foreach (var artist in filtered)
+        {
+            if (ReferenceEquals(artist, last))
+                break;
+
+            foreach (var album in artist.Children)
+            {
+                if (!_musicLeaves.TryGetValue(album, out var hits))
+                    continue;
+
+                foreach (var t in hits)
+                {
+                    if (t.DisplayName.Contains(term, StringComparison.OrdinalIgnoreCase))
+                        return (t, toArtist, toAlbum);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Where the re-filed row is now — the queue's LocateRow, in miniature: the store says
+    /// which group the row landed in and how far into it, and the model turns that into an index.
+    /// The ancestors are opened first, because a row under a folded branch has no index at all.</summary>
+    private int LocateRefiled(MusicTrack track)
+    {
+        var key = GroupKeyOf(track.GroupArtist, track.GroupAlbum);
+        if (_model.GroupByKey(key) is not DemoNode album
+            || !_musicLeaves.TryGetValue(album, out var hits))
+            return -1;
+
+        var offset = Array.IndexOf(hits, track);
+        if (offset < 0)
+            return -1;
+
+        var opened = false;
+        for (var n = album; n is not null; n = n.Parent)
+        {
+            if (n.IsExpanded)
+                continue;
+            n.IsExpanded = true;
+            opened = true;
+        }
+        if (opened)
+            _table.RefreshAfterTreeToggle();
+
+        return _model.FlatIndexOf(key, offset);
+    }
+
     /// <summary>The name of the row at the top of the viewport, or null where a page has not
     /// landed yet.</summary>
     private string? TopVisibleName()
@@ -881,6 +1169,11 @@ public sealed partial class VirtualHosterView : Grid
         => group.GroupAlbum is { } album
             ? "b\u001f" + group.GroupArtist + "\u001f" + album
             : "a\u001f" + group.GroupArtist;
+
+    /// <summary>The same key from names alone — what a store hands back for a row it has just
+    /// re-filed, before any node exists for where it went.</summary>
+    private static string GroupKeyOf(string artist, string album)
+        => "b\u001f" + artist + "\u001f" + album;
 
     private readonly Dictionary<DemoNode, MusicTrack[]> _musicLeaves = new();
 
@@ -1231,6 +1524,15 @@ public sealed partial class VirtualHosterView : Grid
         if (Environment.GetCommandLineArgs().Contains("--reanchor"))
         {
             await ReanchorProbeAsync();
+            return;
+        }
+
+        // --refile: the reported hang, whole. A filter, a recognition that moves one row to the far
+        // end of the tree, a rebuild, and the grid following the row there — one dispatcher pass,
+        // no layout in between, which is the only arrangement in which any of it goes wrong.
+        if (Environment.GetCommandLineArgs().Contains("--refile"))
+        {
+            await RefileProbeAsync();
             return;
         }
 

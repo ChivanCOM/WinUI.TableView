@@ -104,6 +104,18 @@ public sealed class MusicLibrary
             });
         }
 
+        return From(tracks);
+    }
+
+    /// <summary>
+    /// The same collection, grouped again from the tags the tracks carry NOW.
+    ///
+    /// <para>What a recognition does: the names on a file change, and the file belongs somewhere
+    /// else because of it. The store answers the next query from the new tags, so the harness
+    /// regroups rather than reloading — same objects, new shelves.</para>
+    /// </summary>
+    public static MusicLibrary From(IReadOnlyList<MusicTrack> tracks)
+    {
         // Same ordering the queue uses: artist, then album, then disc/track/title within it, so a
         // page fetched by offset returns what the grid would show at that offset.
         var artists = tracks
