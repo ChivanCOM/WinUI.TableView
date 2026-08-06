@@ -2837,6 +2837,65 @@ public partial class TableView : ListView
     /// Scrolls the specified cell slot into view.
     /// </summary>
     /// <param name="slot">The cell slot to scroll into view.</param>
+    /// <summary>
+    /// Takes the viewport to a row by INDEX, by moving the scroll offset there directly.
+    ///
+    /// <para>Use this and not <see cref="ItemsControl"/>'s ScrollIntoView for a row that has moved a
+    /// long way. ScrollIntoView reaches its target by filling the panel forward towards it — one line
+    /// at a time, materializing a container, its template and its theme references for every row it
+    /// passes. Over a few screens that is unremarkable; over a list of tens of thousands it is a
+    /// single measure pass that does not return. Measured on a re-filed track in a 27,000-row queue:
+    /// the interface stopped for as long as it was left running, at 429 MB/s of template garbage, and
+    /// the resulting collections took half of every second — enough to empty the audio buffer and
+    /// stop the music. Setting the offset makes the layouter JUMP: it drops the realized rows and
+    /// builds one viewport at the destination.</para>
+    ///
+    /// <para>The offset comes from <see cref="RowOffsetOfIndex"/> where the host provides one, and
+    /// from index × pitch where it does not — the same arithmetic the re-anchor uses, and wrong in
+    /// the same way for mixed row heights, which is why a host with those should provide the
+    /// function.</para>
+    /// </summary>
+    /// <param name="index">The row's index in the source.</param>
+    /// <returns><see langword="true"/> if the viewport was moved there; <see langword="false"/> when
+    /// the row is near enough that the panel's own fill is both cheap and exact, and the caller
+    /// should use that instead.</returns>
+    private bool JumpToRow(int index)
+    {
+        if (index < 0 || _scrollViewer is not { } sv || sv.ViewportHeight <= 0)
+        {
+            return false;
+        }
+
+        var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1
+                    ?? (double.IsNaN(RowHeight) ? 41 : RowHeight + 1);
+
+        var top = RowOffsetOfIndex?.Invoke(index) ?? index * pitch;
+        var bottom = top + pitch;
+
+        // Already on screen: nothing to do, and this is asked on every change that MIGHT have moved
+        // a row.
+        if (top >= sv.VerticalOffset && bottom <= sv.VerticalOffset + sv.ViewportHeight)
+        {
+            return true;
+        }
+
+        // Within a screen either way, the panel fills there in a handful of lines, and it does it
+        // against the real heights rather than an assumed pitch. Leave it to do that.
+        if (top > sv.VerticalOffset - sv.ViewportHeight &&
+            bottom < sv.VerticalOffset + (sv.ViewportHeight * 2))
+        {
+            return false;
+        }
+
+        // The least travel that shows it: from above, its top; from below, its bottom against the
+        // bottom edge. Landing it in the middle would move the reader further than they asked.
+        var target = top < sv.VerticalOffset ? top : bottom - sv.ViewportHeight;
+
+        sv.ChangeView(null, Math.Clamp(target, 0, Math.Max(0, sv.ScrollableHeight)), null,
+                      disableAnimation: true);
+        return true;
+    }
+
     public async Task<TableViewCell> ScrollCellIntoView(TableViewCellSlot slot)
     {
         if (_scrollViewer is null || !slot.IsValid(this) || await ScrollRowIntoView(slot.Row) is not { } row)
@@ -2874,12 +2933,17 @@ public partial class TableView : ListView
         if ((cellLeft >= viewportLeft && cellRight <= viewportRight) ||
             xOffset == HorizontalOffset)
         {
-            return row.Cells.ElementAt(slot.Column);
+            return row.CellForColumn(slot.Column)!;
         }
 
         SetValue(HorizontalOffsetProperty, xOffset);
 
-        return row?.Cells.ElementAt(slot.Column)!;
+        // The column has only just been scrolled to, so under column virtualization this row may not
+        // have built its cell yet: the range change hands the rows out a few per frame, and this
+        // caller wants the cell NOW. Asking this one row to catch up is what that costs.
+        row.SyncCells();
+
+        return row.CellForColumn(slot.Column)!;
     }
 
     /// <summary>
@@ -2896,7 +2960,14 @@ public partial class TableView : ListView
         // a wrong duplicate index), and overwriting index with that silently broke PageDown/End
         // and scrolling into a cold region. ContainerFromIndex(index) in the retry loop below
         // needs the real index. (There is no "item without index" caller here to reconcile.)
-        ScrollIntoView(item);
+        //
+        // A row a long way off is reached by MOVING there, not by filling towards it — see JumpToRow.
+        // The loop below then corrects the landing against the real heights, which is the part
+        // ScrollIntoView was being relied on for and the part that is cheap.
+        if (!JumpToRow(index))
+        {
+            ScrollIntoView(item);
+        }
 
         var tries = 0;
         while (tries < 10)
@@ -2952,17 +3023,7 @@ public partial class TableView : ListView
             return default;
         }
 
-        // By the cell's own column index rather than its position: frozen cells come first in the
-        // list, and under column virtualization the ones off screen are not in it at all.
-        foreach (var cell in row.Cells)
-        {
-            if (cell.Index == slot.Column)
-            {
-                return cell;
-            }
-        }
-
-        return default;
+        return row.CellForColumn(slot.Column);
     }
 
     /// <summary>

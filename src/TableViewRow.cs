@@ -686,17 +686,30 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     internal void ApplyCurrentCellState(TableViewCellSlot slot)
     {
-        // By the cell's own column index, not by its position in the list: the list holds the frozen
-        // cells first and, when columns are virtualized, only the realized ones — neither of which
-        // puts column N at position N.
+        CellForColumn(slot.Column)?.ApplyCurrentCellState();
+    }
+
+    /// <summary>
+    /// This row's cell for a column, by the column's index among the visible columns.
+    /// </summary>
+    /// <remarks>
+    /// Never by position in <see cref="Cells"/>. That list holds the frozen cells first and, when
+    /// columns are virtualized, only the ones on screen — so column N is not at position N in either
+    /// case, and indexing it either returns another column's cell or walks off the end.
+    /// </remarks>
+    /// <returns>The cell, or null when this row has not built one for that column — which under
+    /// column virtualization is the normal state of every column off screen.</returns>
+    internal TableViewCell? CellForColumn(int visibleIndex)
+    {
         foreach (var cell in Cells)
         {
-            if (cell.Index == slot.Column)
+            if (cell.Index == visibleIndex)
             {
-                cell.ApplyCurrentCellState();
-                return;
+                return cell;
             }
         }
+
+        return null;
     }
 
     /// <summary>
