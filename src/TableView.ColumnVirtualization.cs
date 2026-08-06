@@ -12,6 +12,7 @@
 using Microsoft.UI.Xaml;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace WinUI.TableView;
 
@@ -93,7 +94,7 @@ public partial class TableView
         var count = visible.Count;
         var frozen = Math.Clamp(FrozenColumnCount, 0, count);
 
-        if (!VirtualizeColumns)
+        if (!VirtualizeColumns || SizedFromCellsThatWouldNotExist(visible))
         {
             ApplyColumnRange((0, count), 0d, 0d);
             return;
@@ -123,6 +124,61 @@ public partial class TableView
 
         ApplyColumnRange(range, inset, hidden);
     }
+
+    /// <summary>
+    /// Whether any column takes its width from measuring its own cells — in which case this grid does
+    /// not virtualize its columns at all, and says so once.
+    /// </summary>
+    /// <remarks>
+    /// An auto-width column sized from its cells learns its width from a cell's measure, and a column
+    /// that is never realized never has one: it would size from its header alone and then jump the
+    /// moment it was first scrolled to. Keeping such a column realized until it has been measured was
+    /// tried and is not honest — the width is re-baselined periodically so the column may shrink back
+    /// (see RefreshColumnsAutoWidth), which would flip it in and out of being virtualized for the life
+    /// of the grid, and the feature would appear to be on while doing nothing.
+    ///
+    /// <para>So the whole grid opts out, visibly. A grid that wants both wants a way to measure a
+    /// column without building a row's worth of cells for it, and that does not exist yet.</para>
+    /// </remarks>
+    private bool SizedFromCellsThatWouldNotExist(IList<TableViewColumn> visible)
+    {
+        List<string>? offenders = null;
+
+        for (var i = 0; i < visible.Count; i++)
+        {
+            var column = visible[i];
+            if (!column.Width.IsAuto)
+            {
+                continue;
+            }
+
+            var mode = column.ColumnAutoWidthMode ?? ColumnAutoWidthMode;
+            if (mode is TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both)
+            {
+                (offenders ??= []).Add(column.Header?.ToString() ?? $"column {i}");
+            }
+        }
+
+        if (offenders is null)
+        {
+            return false;
+        }
+
+        // Once per grid. This is a standing condition, not an event, and repeating it every layout
+        // pass would bury everything else.
+        if (!_warnedAboutAutoWidthColumns)
+        {
+            _warnedAboutAutoWidthColumns = true;
+            Debug.WriteLine($"[TableView] VirtualizeColumns is off for this grid: "
+                + $"{string.Join(", ", offenders)} take their width from measuring their cells, and a "
+                + "column that is never built is never measured. Give them explicit widths, or set "
+                + "ColumnAutoWidthMode to Header, to virtualize columns here.");
+        }
+
+        return true;
+    }
+
+    private bool _warnedAboutAutoWidthColumns;
 
     /// <summary>
     /// Takes the new range, and rebuilds what it invalidates. The rows only rebuild when the SET of
