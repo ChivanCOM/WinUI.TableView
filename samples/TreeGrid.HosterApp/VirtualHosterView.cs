@@ -1199,6 +1199,14 @@ public sealed partial class VirtualHosterView : Grid
             return;
         }
 
+        // --flick: the trackpad gesture itself — a decaying burst of small scrolls — through the
+        // grid's own wheel path, with --cap N rows/frame to measure the scroll cap.
+        if (Environment.GetCommandLineArgs().Contains("--flick"))
+        {
+            await FlickProbeAsync();
+            return;
+        }
+
         // --wheel: scrolling at the speed a hand scrolls, which is the speed that hits the wall.
         if (Environment.GetCommandLineArgs().Contains("--wheel"))
         {
@@ -1348,6 +1356,77 @@ public sealed partial class VirtualHosterView : Grid
     /// walks the list, and every row it walks past has to be realized: a container, its cells, its
     /// bindings, its measure. This is the probe for the wall a reader hits twenty rows in.</para>
     /// </summary>
+    /// <summary>
+    /// A trackpad flick: not one scroll but a burst of small ones, arriving every frame and
+    /// decaying as the momentum runs out — which is the gesture that makes the layouter walk the
+    /// list a row at a time instead of jumping. Drives the grid's own wheel path so the scroll cap
+    /// (<see cref="TableView.MaxScrollRowsPerFrame"/>) is measured exactly as a hand would meet it.
+    /// </summary>
+    private async Task FlickProbeAsync()
+    {
+        var cap = double.TryParse(ReadArg("--cap"), out var c) ? c : 0;
+
+        BuildSkeletonAndModel();
+        ScrollToOffset(0);
+        await SettleAsync();
+        _scrollViewer ??= FindScrollViewer(_table);
+        if (_scrollViewer is not { } sv)
+        {
+            Console.WriteLine("[hoster:flick] no ScrollViewer");
+            Finish(false);
+            return;
+        }
+
+        _table.MaxScrollRowsPerFrame = cap;
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var gaps = new List<long>();
+        var last = sw.ElapsedMilliseconds;
+
+        // Four flicks, each a burst that decays the way momentum does.
+        for (var flick = 0; flick < 4; flick++)
+        {
+            var velocity = 900.0;      // pixels per frame at the top of the flick
+            while (velocity > 8)
+            {
+                var t0 = sw.ElapsedMilliseconds;
+                gaps.Add(t0 - last);
+                last = t0;
+
+                _table.ScrollByPixels(velocity);
+                velocity *= 0.92;
+
+                await Task.Delay(16);
+            }
+
+            // Let it settle before the next flick, as a hand does.
+            for (var i = 0; i < 12; i++)
+            {
+                var t0 = sw.ElapsedMilliseconds;
+                gaps.Add(t0 - last);
+                last = t0;
+                await Task.Delay(16);
+            }
+        }
+
+        gaps.RemoveAt(0);
+        gaps.Sort();
+        var median = gaps[gaps.Count / 2];
+        var p99 = gaps[(int)(gaps.Count * 0.99)];
+        var worst = gaps[^1];
+        var janky = gaps.Count(g => g >= 50);
+
+        Console.WriteLine($"[hoster:flick] cap={cap:0.#} rows/frame frames={gaps.Count} "
+            + $"offset={sv.VerticalOffset:F0} gapMedian={median}ms gapP99={p99}ms gapWorst={worst}ms "
+            + $"framesOver50ms={janky}");
+
+        var ok = worst <= 100;
+        Console.WriteLine(ok
+            ? $"[hoster:flick] PASS — worst frame {worst}ms"
+            : $"[hoster:flick] FAIL — worst frame {worst}ms");
+        Finish(ok);
+    }
+
     private async Task WheelProbeAsync()
     {
         // --nolatency: no simulated store latency, so a stall that survives is not a page landing.

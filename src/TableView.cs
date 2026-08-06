@@ -196,11 +196,25 @@ public partial class TableView : ListView
     /// shorter than that is not worth a line. This is the instrument for a stall in a REAL app,
     /// where the work a row does is the app's own and no harness can stand in for it.</para>
     /// </summary>
-    private static readonly int StallThresholdMs =
-        int.TryParse(Environment.GetEnvironmentVariable("TABLEVIEW_STALL_MS"), out var ms) ? ms : 0;
+    private static readonly int StallThresholdMs = ReadStallThreshold();
+
+    /// <summary>The threshold, from the environment or from <c>--stall-ms N</c> on the command
+    /// line. Both, because a launcher that can pass arguments cannot always pass an environment.</summary>
+    private static int ReadStallThreshold()
+    {
+        if (int.TryParse(Environment.GetEnvironmentVariable("TABLEVIEW_STALL_MS"), out var fromEnv) && fromEnv > 0)
+        {
+            return fromEnv;
+        }
+
+        var args = Environment.GetCommandLineArgs();
+        var at = Array.IndexOf(args, "--stall-ms");
+        return at >= 0 && at + 1 < args.Length && int.TryParse(args[at + 1], out var fromArgs) ? fromArgs : 0;
+    }
 
     private static Microsoft.UI.Dispatching.DispatcherQueueTimer? _stallTimer;
     private static long _stallLastTick;
+    private static double _stallLastOffset;
     private static long _stallPrepares, _stallPrepareTicks, _stallPostTicks, _stallMeasureTicks,
                         _stallCellTicks, _stallCells, _stallArrangeTicks, _stallArranges,
                         _stallLists, _stallRowIdx;
@@ -224,10 +238,17 @@ public partial class TableView : ListView
             var elapsedMs = (now - _stallLastTick) * 1000 / Stopwatch.Frequency;
             _stallLastTick = now;
 
+            // How far the reader actually moved while the thread was busy. Rows realized far in
+            // excess of the distance travelled are rows being built twice, not rows being reached.
+            var offset = _scrollViewer?.VerticalOffset ?? 0;
+            var moved = offset - _stallLastOffset;
+            _stallLastOffset = offset;
+
             if (elapsedMs >= StallThresholdMs)
             {
                 static long Ms(long ticks) => ticks * 1000 / Stopwatch.Frequency;
-                Console.WriteLine($"[stall] {elapsedMs}ms "
+                Console.WriteLine($"[stall] {elapsedMs}ms offset={offset:F0} moved={moved:F0} "
+                    + $"rows={Items?.Count ?? 0} "
                     + $"prepares={DiagPrepares - _stallPrepares} prepMs={Ms(DiagPrepareTicks - _stallPrepareTicks)} "
                     + $"postPrepMs={Ms(DiagPostPrepareTicks - _stallPostTicks)} "
                     + $"rowMeasureMs={Ms(DiagRowMeasureTicks - _stallMeasureTicks)} "
@@ -791,6 +812,95 @@ public partial class TableView : ListView
             var mouseWheelDelta = isShiftButton ? -pointerPoint.Properties.MouseWheelDelta : pointerPoint.Properties.MouseWheelDelta;
             var xOffset = HorizontalOffset + (mouseWheelDelta / 4.0);
             SetValue(HorizontalOffsetProperty, Math.Clamp(xOffset, 0, _scrollViewer.ScrollableWidth));
+            return;
+        }
+
+        // A trackpad flick is not one big scroll, it is a few hundred small ones — and a scroll
+        // smaller than a viewport makes the layouter WALK the list, realizing every row it passes.
+        // At a few milliseconds a row that is a frame's whole budget spent several times over, so
+        // the list stops dead until the flick's momentum runs out. (A scrollbar drag is smooth for
+        // exactly the opposite reason: one delta bigger than a viewport, and the layouter jumps.)
+        //
+        // So the list travels no further per frame than it can draw, and what is left over is
+        // carried into the next frame rather than dropped: the gesture arrives in full, a little
+        // later, instead of arriving at once and freezing.
+        if (MaxScrollRowsPerFrame > 0 && !isHorizontalScroll && _scrollViewer is not null)
+        {
+            e.Handled = true;
+            ScrollByPixels(-pointerPoint.Properties.MouseWheelDelta / WheelUnitsPerLine * LinePixels);
+        }
+    }
+
+    /// <summary>How far the list may travel in one frame, in rows. Zero leaves scrolling alone.</summary>
+    public double MaxScrollRowsPerFrame { get; set; }
+
+    /// <summary>One wheel notch, as the platform reports it.</summary>
+    private const double WheelUnitsPerLine = 40;
+
+    /// <summary>What a notch is worth in pixels — three lines, as a wheel usually scrolls.</summary>
+    private const double LinePixels = 16;
+
+    private double _pendingScroll;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _scrollDrainTimer;
+
+    /// <summary>
+    /// Queues a scroll of <paramref name="pixels"/> and lets it out at most one frame's worth at a
+    /// time. Public so the harness can drive the same path a wheel does.
+    /// </summary>
+    public void ScrollByPixels(double pixels)
+    {
+        if (_scrollViewer is not { } sv)
+        {
+            return;
+        }
+
+        _pendingScroll += pixels;
+
+        if (MaxScrollRowsPerFrame <= 0)
+        {
+            Drain();
+            return;
+        }
+
+        if (_scrollDrainTimer is null && DispatcherQueue is not null)
+        {
+            _scrollDrainTimer = DispatcherQueue.CreateTimer();
+            _scrollDrainTimer.Interval = TimeSpan.FromMilliseconds(16);
+            _scrollDrainTimer.IsRepeating = true;
+            _scrollDrainTimer.Tick += (_, _) => Drain();
+        }
+
+        _scrollDrainTimer?.Start();
+
+        void Drain()
+        {
+            if (Math.Abs(_pendingScroll) < 0.5)
+            {
+                _pendingScroll = 0;
+                _scrollDrainTimer?.Stop();
+                return;
+            }
+
+            var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? RowHeight + 1;
+            var cap = MaxScrollRowsPerFrame > 0 ? MaxScrollRowsPerFrame * pitch : double.MaxValue;
+
+            // Letting a large backlog through in one step was tried and is worse: past a viewport
+            // the layouter stops walking and jumps, but a jump is not cheap — it drops every
+            // realized row and rebuilds a whole viewport at the destination. Measured over the same
+            // four flicks, jumping puts the worst frame at 480ms against 179ms for crawling.
+            var step = Math.Clamp(_pendingScroll, -cap, cap);
+            var target = Math.Clamp(sv.VerticalOffset + step, 0, Math.Max(0, sv.ScrollableHeight));
+
+            // Nothing left to give — at either end the rest of the gesture has nowhere to go.
+            if (Math.Abs(target - sv.VerticalOffset) < 0.5)
+            {
+                _pendingScroll = 0;
+                _scrollDrainTimer?.Stop();
+                return;
+            }
+
+            _pendingScroll -= step;
+            sv.ChangeView(null, target, null, disableAnimation: true);
         }
     }
 
