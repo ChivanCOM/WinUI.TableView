@@ -67,7 +67,7 @@ public static class ColumnStrip
 
         for (var i = frozen; i < count; i++)
         {
-            var w = Width(widths[i]);
+            var w = Width(widths![i]);
             var right = x + w;
 
             // Intersects when it starts before the viewport ends and ends after it starts. A

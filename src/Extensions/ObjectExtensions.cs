@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Linq.Expressions;
@@ -344,6 +345,14 @@ internal static partial class ObjectExtensions
         return TryConvertObject(value, targetType, out convertedValue, out error);
     }
 
+    [UnconditionalSuppressMessage("Trimming", "IL2026:RequiresUnreferencedCode",
+        Justification = "Same ground as the IL2070/IL2075 NoWarn in the csproj: this library binds by " +
+                        "property name through reflection and compiles expression trees, so its " +
+                        "converters cannot be resolved statically. The consuming app does not trim.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2067:UnrecognizedReflectionPattern",
+        Justification = "The target type is whatever a column is bound to, known only at runtime; " +
+                        "annotating it with DynamicallyAccessedMembers.All would push the requirement " +
+                        "up through every caller to the binding path itself.")]
     private static bool TryConvertToTargetType(string? stringValue, Type targetType, out object? convertedValue, out string? error)
     {
         error = null;
@@ -559,9 +568,11 @@ internal static partial class ObjectExtensions
             }
             else
             {
+#pragma warning disable IL3050 // The lambda around this is Compile()d, so this path already needs a JIT; Nullable<T> over the leaf's own value type adds no instantiation an AOT build could have kept.
                 var resultType = nextSegmentAccess.Type.IsValueType && !nextSegmentAccess.Type.IsNullableType()
                     ? typeof(Nullable<>).MakeGenericType(nextSegmentAccess.Type)
                     : nextSegmentAccess.Type;
+#pragma warning restore IL3050
 
                 current = Expression.Condition(
                     Expression.NotEqual(current, Expression.Constant(null, current.Type)),

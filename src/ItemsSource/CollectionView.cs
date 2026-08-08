@@ -686,6 +686,10 @@ internal partial class CollectionView : ICollectionView, ISupportIncrementalLoad
 
     void IList.Remove(object? item) => Remove(item);
 
+    bool IList.Contains(object? item) => Contains(item!);
+
+    void IList.Insert(int index, object? item) => Insert(index, item!);
+
     void ICollection.CopyTo(Array array, int index)
     {
         for (var i = 0; i < _view.Count && index + i < array.Length; i++)
