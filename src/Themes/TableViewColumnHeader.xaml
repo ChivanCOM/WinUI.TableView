@@ -132,20 +132,48 @@
                                     <Button.Flyout>
                                         <local:TableViewFilterMenuFlyout x:Name="OptionsFlyout"
                                                                          Placement="Bottom">
+                                            <!-- The four commands are sized like an app's own context menus rather than like a
+                                                 dialog: 12pt text on a 26px row. The icon Viewbox in the MenuFlyoutItem template is a
+                                                 literal 16x16 that STRETCHES its glyph, so FontSize there does nothing — the arrows are
+                                                 brought down with a render-only ScaleTransform, which leaves the row height alone. -->
                                             <local:TableViewFilterMenuFlyout.Items>
-                                                <MenuFlyoutItem x:Name="SortAscendingMenuItem">
+                                                <MenuFlyoutItem x:Name="SortAscendingMenuItem"
+                                                                FontSize="12"
+                                                                MinHeight="26"
+                                                                Padding="11,3">
                                                     <MenuFlyoutItem.Icon>
-                                                        <FontIcon Glyph="&#xf0ad;" />
+                                                        <FontIcon Glyph="&#xf0ad;"
+                                                                  RenderTransformOrigin="0.5,0.5">
+                                                            <FontIcon.RenderTransform>
+                                                                <ScaleTransform ScaleX="0.72"
+                                                                                ScaleY="0.72" />
+                                                            </FontIcon.RenderTransform>
+                                                        </FontIcon>
                                                     </MenuFlyoutItem.Icon>
                                                 </MenuFlyoutItem>
-                                                <MenuFlyoutItem x:Name="SortDescendingMenuItem">
+                                                <MenuFlyoutItem x:Name="SortDescendingMenuItem"
+                                                                FontSize="12"
+                                                                MinHeight="26"
+                                                                Padding="11,3">
                                                     <MenuFlyoutItem.Icon>
-                                                        <FontIcon Glyph="&#xf0ae;" />
+                                                        <FontIcon Glyph="&#xf0ae;"
+                                                                  RenderTransformOrigin="0.5,0.5">
+                                                            <FontIcon.RenderTransform>
+                                                                <ScaleTransform ScaleX="0.72"
+                                                                                ScaleY="0.72" />
+                                                            </FontIcon.RenderTransform>
+                                                        </FontIcon>
                                                     </MenuFlyoutItem.Icon>
                                                 </MenuFlyoutItem>
-                                                <MenuFlyoutItem x:Name="ClearSortingMenuItem" />
+                                                <MenuFlyoutItem x:Name="ClearSortingMenuItem"
+                                                                FontSize="12"
+                                                                MinHeight="26"
+                                                                Padding="11,3" />
                                                 <MenuFlyoutSeparator x:Name="MenuFlyoutSeparator" />
-                                                <MenuFlyoutItem x:Name="ClearFilterMenuItem" />
+                                                <MenuFlyoutItem x:Name="ClearFilterMenuItem"
+                                                                FontSize="12"
+                                                                MinHeight="26"
+                                                                Padding="11,3" />
                                             </local:TableViewFilterMenuFlyout.Items>
                                             <local:TableViewFilterMenuFlyout.FlyoutPresenterStyle>
                                                 <Style TargetType="FlyoutPresenter"
@@ -198,17 +226,25 @@
                                                                         <controls:TableViewFilterItemsControl Grid.Row="1" />
 
                                                                         <Grid Grid.Row="2"
-                                                                              Margin="12,4"
-                                                                              ColumnSpacing="16">
+                                                                              Margin="8,2,8,6"
+                                                                              ColumnSpacing="8">
                                                                             <Grid.ColumnDefinitions>
                                                                                 <ColumnDefinition Width="*" />
                                                                                 <ColumnDefinition Width="*" />
                                                                             </Grid.ColumnDefinitions>
                                                                             <Button x:Name="OkButton"
+                                                                                    FontSize="12"
+                                                                                    MinHeight="26"
+                                                                                    MinWidth="0"
+                                                                                    Padding="8,2"
                                                                                     HorizontalAlignment="Stretch"
                                                                                     Style="{StaticResource AccentButtonStyle}" />
                                                                             <Button x:Name="CancelButton"
                                                                                     Grid.Column="1"
+                                                                                    FontSize="12"
+                                                                                    MinHeight="26"
+                                                                                    MinWidth="0"
+                                                                                    Padding="8,2"
                                                                                     HorizontalAlignment="Stretch" />
                                                                         </Grid>
                                                                     </Grid>

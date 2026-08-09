@@ -74,12 +74,33 @@ public partial class TableViewFilterMenuFlyout : Flyout
         okButton?.Command = _okCommand;
         cancelButton?.Command = _cancelCommand;
 
+        ApplyAppButtonStyle(okButton, "TableViewFilterFlyoutPrimaryButtonStyle");
+        ApplyAppButtonStyle(cancelButton, "TableViewFilterFlyoutSecondaryButtonStyle");
+
         presenter.Loaded -= OnPresenterLoaded;
         _filterItemsControl?.Initialize();
 
         foreach (var item in Items.OfType<MenuFlyoutItem>())
         {
             item.Tapped += OnMenuItemTapped;
+        }
+    }
+
+    /// <summary>
+    /// Applies an application-level button style to the flyout's Ok/Cancel buttons when the host app
+    /// defines one under the given key. The template's own styles live inside this library's dictionary,
+    /// where a XAML lookup would resolve them before ever reaching the app's resources — so the swap is
+    /// done here, against Application.Current.Resources, and simply doesn't happen when the key is absent.
+    /// </summary>
+    private static void ApplyAppButtonStyle(Button? button, string key)
+    {
+        if (button is null) return;
+
+        if (Application.Current?.Resources?.TryGetValue(key, out var resource) is true
+            && resource is Style style
+            && style.TargetType == typeof(Button))
+        {
+            button.Style = style;
         }
     }
 

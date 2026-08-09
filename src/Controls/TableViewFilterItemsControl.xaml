@@ -13,15 +13,22 @@
         <converters:BoolToVisibilityConverter x:Key="BoolToVisibility" />
     </UserControl.Resources>
 
-    <Grid Margin="8,4"
-          Width="250"
-          Height="300">
+    <!-- Sized like a context menu rather than a dialog: 12pt throughout, 26 px rows. The CheckBox
+         template draws a literal 20x20 box that no property shrinks, so each one carries a render-only
+         ScaleTransform — the box comes down with its text and the row height stays exactly what the
+         list says it is. -->
+    <Grid Margin="6,3"
+          Width="208"
+          Height="250">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
         <TextBox x:Name="searchBox"
+                 FontSize="12"
+                 MinHeight="26"
+                 Padding="8,2,8,3"
                  PlaceholderText="{x:Bind local:TableViewLocalizedStrings.SearchBoxPlaceholder}"
                  TextChanged="OnSearchBoxTextChanged"
                  win:PreviewKeyDown="OnSearchBoxKeyDown"
@@ -30,10 +37,19 @@
                 BorderThickness="0,0,0,1"
                 BorderBrush="{ThemeResource MenuFlyoutSeparatorBackground}">
             <CheckBox x:Name="selectAllCheckBox"
-                      Margin="12,8,12,1"
-                      Content="{x:Bind local:TableViewLocalizedStrings.SelectAllParenthesized}" 
+                      Margin="8,5,8,1"
+                      MinWidth="0"
+                      MinHeight="24"
+                      FontSize="15"
+                      RenderTransformOrigin="0,0.5"
+                      Content="{x:Bind local:TableViewLocalizedStrings.SelectAllParenthesized}"
                       Checked="OnSelectAllCheckBoxCheckChanged"
-                      Unchecked="OnSelectAllCheckBoxCheckChanged"/>
+                      Unchecked="OnSelectAllCheckBoxCheckChanged">
+                <CheckBox.RenderTransform>
+                    <ScaleTransform ScaleX="0.8"
+                                    ScaleY="0.8" />
+                </CheckBox.RenderTransform>
+            </CheckBox>
         </Border>
         <ListView x:Name="filterItemsList"
                   Grid.Row="2"
@@ -43,13 +59,13 @@
                 <Style TargetType="ListViewItem"
                        BasedOn="{StaticResource DefaultListViewItemStyle}">
                     <Setter Property="Padding"
-                            Value="12,0" />
+                            Value="8,0" />
                     <Setter Property="Margin"
                             Value="0" />
                     <Setter Property="MinHeight"
-                            Value="36" />
+                            Value="26" />
                     <Setter Property="Height"
-                            Value="36" />
+                            Value="26" />
                     <Setter Property="HorizontalAlignment"
                             Value="Stretch" />
                     <Setter Property="HorizontalContentAlignment"
@@ -59,8 +75,16 @@
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="local:TableViewFilterItem">
                     <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
+                              MinWidth="0"
+                              MinHeight="24"
+                              FontSize="15"
+                              RenderTransformOrigin="0,0.5"
                               HorizontalAlignment="Stretch"
                               HorizontalContentAlignment="Stretch">
+                        <CheckBox.RenderTransform>
+                            <ScaleTransform ScaleX="0.8"
+                                            ScaleY="0.8" />
+                        </CheckBox.RenderTransform>
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
