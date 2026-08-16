@@ -540,6 +540,29 @@ public partial class TableView : ListView
     {
         DiagPrepares++;
         DiagActiveGrid = this;
+
+        // Before the base call, because the base call is what puts the item on the row — and a row
+        // whose content changes rebuilds or refills itself, which it cannot do without knowing the
+        // grid it belongs to.
+        //
+        // This used to be assigned a dispatcher tick later, so every recycled row did that work with
+        // a null grid. It cost nothing while a row's columns were bindings that re-resolve on their
+        // own; it costs everything now that a row writes its own values, because the row read as not
+        // being a light one and refreshed the handful of cells it still had. A sort showed it plainly:
+        // the rows stay on screen, only their values move, and only the two template columns moved.
+        if (element is TableViewRow tracked)
+        {
+            tracked.TableView = this;
+            tracked.InvalidateIndex();
+
+            // Tracked as currently-realized. Added here (on realize), removed in
+            // ClearContainerForItemOverride (on recycle) so _rows stays bounded to the viewport.
+            if (!_rows.Contains(tracked))
+            {
+                _rows.Add(tracked);
+            }
+        }
+
         var diagT0 = System.Diagnostics.Stopwatch.GetTimestamp();
         base.PrepareContainerForItemOverride(element, item);
         DiagPrepareTicks += System.Diagnostics.Stopwatch.GetTimestamp() - diagT0;
@@ -560,23 +583,6 @@ public partial class TableView : ListView
             DiagCharge(ref DiagReseatTicks, ref DiagReseats, ReseatPanelRows);
         }
 #endif
-
-        // Track the row as currently-realized. Added here (on realize), removed
-        // in ClearContainerForItemOverride (on recycle) so _rows stays bounded
-        // to the viewport. Previously rows were added in GetContainerForItemOverride
-        // and never removed — _rows grew without bound across scrolling, leaking
-        // every TableViewRow ever created and turning the _rows iteration in
-        // selection / layout / grid-line passes into an O(rows-ever-realized)
-        // walk that compounds the per-click cost on large virtualized sources.
-        if (element is TableViewRow tracked)
-        {
-            tracked.InvalidateIndex();
-
-            if (!_rows.Contains(tracked))
-            {
-                _rows.Add(tracked);
-            }
-        }
 
         DispatcherQueue.TryEnqueue(() =>
         {

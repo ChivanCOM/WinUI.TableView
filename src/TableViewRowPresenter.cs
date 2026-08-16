@@ -579,6 +579,15 @@ public partial class TableViewRowPresenter : Control
     /// <inheritdoc cref="_lightFrozen"/>
     private TableViewLightCellsPanel? _lightScrollable;
 
+    /// <summary>
+    /// Whether this row is drawing through the light panels.
+    ///
+    /// <para>Asked of the row itself rather than of the grid, because a recycled row is re-bound
+    /// before it is told which grid it belongs to, and a row that answered "no" in that window would
+    /// refresh the cells it does not have and leave the panels showing the item before.</para>
+    /// </summary>
+    internal bool HasLightCells => _lightScrollable is not null;
+
     /// <summary>Builds the light panels, if this row is drawing that way and has not got them yet.</summary>
     internal void EnsureLightCells()
     {

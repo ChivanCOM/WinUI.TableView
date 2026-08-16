@@ -309,9 +309,11 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     internal void RefreshCells(object? item)
     {
-        if (IsLight)
+        // The presenter's own answer, not the grid's: this runs from OnContentChanged, and a row is
+        // re-bound before it is told which grid it belongs to.
+        if (RowPresenter is { HasLightCells: true } presenter)
         {
-            RowPresenter?.ShowLightCells(item);
+            presenter.ShowLightCells(item);
             return;
         }
 

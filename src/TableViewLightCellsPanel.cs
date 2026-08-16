@@ -263,12 +263,15 @@ internal sealed partial class TableViewLightCellsPanel : Panel
     /// </summary>
     internal void Show(object? item)
     {
-        if (_row?.TableView is not { } tableView)
-        {
-            return;
-        }
+        // The grid is not required to write the values: the columns and their elements are already
+        // held, and a recycled row is re-bound before it is told which grid it belongs to. Only the
+        // height and the rules need it, and both keep what they had until it is back.
+        var tableView = _row?.TableView;
 
-        _height = tableView.RowHeightSelector?.Invoke(item) ?? tableView.RowHeight;
+        if (tableView is not null)
+        {
+            _height = tableView.RowHeightSelector?.Invoke(item) ?? tableView.RowHeight;
+        }
 
         foreach (var entry in _entries)
         {
@@ -295,7 +298,10 @@ internal sealed partial class TableViewLightCellsPanel : Panel
         // A grid whose rows are not all the same height (RowHeightSelector) draws its rules to a
         // different length for this item than for the last one. Keyed, so a uniform grid — which is
         // every grid that has not asked otherwise — rebuilds nothing here.
-        EnsureRules(tableView);
+        if (tableView is not null)
+        {
+            EnsureRules(tableView);
+        }
 
         InvalidateMeasure();
     }
