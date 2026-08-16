@@ -168,6 +168,16 @@ public partial class TableView : ListView
         row?.RefreshCells(sender);
     }
 
+    /// <summary>
+    /// Anything the HOST wants on the end of every stall line.
+    ///
+    /// <para>The counters here describe the grid, and a frame the grid had no part in is exactly the
+    /// frame they cannot explain — which is the state a well-optimized grid ends up in. Rather than
+    /// teach this library about the app around it, the app says what it knows: which of its own
+    /// animations are running, what it is loading, whatever the question of the day is.</para>
+    /// </summary>
+    public static Func<string>? DiagAnnotation;
+
     /// <summary>Diagnostics for the hoster's fling probe: container prepares per scroll hop
     /// and the time spent inside them (stopwatch ticks).</summary>
     public static int DiagPrepares;
@@ -477,7 +487,8 @@ public partial class TableView : ListView
                     + $"gcPauseMs={(long)(GC.GetTotalPauseDuration() - _stallGcPause).TotalMilliseconds} "
                     + $"allocMB={(GC.GetTotalAllocatedBytes(precise: false) - _stallAlloc) / (1024 * 1024)} "
                     + $"| cells/frame={(grid._rows.Count * grid.Columns.VisibleColumns.Count)} "
-                    + $"| cellLists={DiagCellListBuilds - _stallLists} rowIdx={DiagRowIndexLookups - _stallRowIdx}");
+                    + $"| cellLists={DiagCellListBuilds - _stallLists} rowIdx={DiagRowIndexLookups - _stallRowIdx}"
+                    + (DiagAnnotation?.Invoke() is { Length: > 0 } note ? $" | {note}" : ""));
             }
 
             Snapshot();
