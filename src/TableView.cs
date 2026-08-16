@@ -1182,6 +1182,11 @@ public partial class TableView : ListView
     private double _paceBudget = double.PositiveInfinity;
 
     private long _lastDrainAt;
+
+    /// <summary>What the grid had charged itself when the last drain ran, so the next one can tell
+    /// how much of the interval since was its own doing.</summary>
+    private long _lastDrainLeaf;
+
     private double _pendingScroll;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _scrollDrainTimer;
 
@@ -1299,26 +1304,36 @@ public partial class TableView : ListView
                 _paceBudget = MaxScrollRowsPerFrame > 0 ? MaxScrollRowsPerFrame * pitch : pitch;
             }
 
+            var leaf = DiagLeafTicks();
+
             if (_lastDrainAt != 0)
             {
-                var frameMs = (now - _lastDrainAt) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-
-                // Down by a factor, up by a row. Multiplicative both ways — which is what this was —
-                // does not settle anywhere: one overrun takes a fifth off the budget and the two
-                // cheap frames that follow put it all back, so the budget spends the whole gesture
-                // oscillating around the ceiling and every third frame is a long one. The stall
-                // lines said so plainly: a frame prepared six rows and took 41ms, or fifty-four and
-                // took 149, with nothing in between.
+                // The WORK the last step caused, not the wall clock it happened inside.
                 //
-                // Additive increase against multiplicative decrease is the standard answer to
-                // exactly this, and for the same reason: it converges on the largest budget the
-                // content can actually deliver instead of repeatedly overshooting it.
-                _paceBudget = frameMs > OverrunFrameMs
+                // This was the elapsed time between drains, and on a renderer that presents on the UI
+                // thread that is mostly time parked waiting for the display. Measured: the same
+                // gesture in a small window and in a maximized one spent about the same per paint —
+                // fifteen to twenty milliseconds — while the grid's own work scaled with the window
+                // by a factor of eight. A fixed cost per present that does not care how many pixels
+                // there are is a vsync interval, and no size of step avoids it.
+                //
+                // Judged on the wall clock, then, every interval holding two paints read as an
+                // overrun and the budget pinned itself at the floor — three rows a drain, while the
+                // grid was spending one millisecond a frame and the list crawled. Judged on the work,
+                // it converges on the largest step whose own cost fits a frame, which is the number
+                // this was always trying to find.
+                var workMs = (leaf - _lastDrainLeaf) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+                // Down by a factor, up by a row. Multiplicative both ways does not settle anywhere:
+                // one overrun takes a fifth off and the two cheap frames after it put all of it back,
+                // so the budget oscillates around the ceiling and every third frame is a long one.
+                _paceBudget = workMs > OverrunFrameMs
                     ? _paceBudget * 0.6
                     : _paceBudget + pitch;
             }
 
             _lastDrainAt = now;
+            _lastDrainLeaf = leaf;
 
             var floor = MaxScrollRowsPerFrame > 0 ? MaxScrollRowsPerFrame * pitch : pitch;
             var ceiling = Math.Max(floor, sv.ViewportHeight);
