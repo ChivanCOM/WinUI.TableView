@@ -59,6 +59,13 @@ public partial class TableViewRow : ListViewItem
     /// <inheritdoc/>
     protected override Windows.Foundation.Size MeasureOverride(Windows.Foundation.Size availableSize)
     {
+        // Which grid the static counters are about. A scroll that only re-measures realizes nothing,
+        // so the prepare path alone would leave the watch reporting whichever grid last built a row.
+        if (TableView is { } owner)
+        {
+            TableView.DiagActiveGrid = owner;
+        }
+
         var diagT0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var size = base.MeasureOverride(availableSize);
         TableView.DiagRowMeasureTicks += System.Diagnostics.Stopwatch.GetTimestamp() - diagT0;

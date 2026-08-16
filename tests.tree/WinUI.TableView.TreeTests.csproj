@@ -19,6 +19,9 @@
     <Compile Include="..\src\Tree\TreeGridFlattener.cs" />
     <Compile Include="..\src\Tree\VirtualTreeModel.cs" />
     <Compile Include="..\src\Tree\ColumnStrip.cs" />
+    <!-- Pure .NET as well: whether a scroll is a wheel or a flick is decided from the deltas and
+         their timing alone, with no pointer in sight. -->
+    <Compile Include="..\src\Tree\WheelGesture.cs" />
     <!-- Pure .NET too: expression-tree property access, no WinUI types. It is what the SQL-backed
          (virtualized) sources read every cell through, so its per-type getter cache belongs here. -->
     <Compile Include="..\src\Extensions\ObjectExtensions.cs" />

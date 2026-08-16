@@ -128,9 +128,12 @@ public partial class TableViewCell : ContentControl
             contentControl.Loaded += OnContentLoaded;
         }
 
+        TableView.DiagCellContentChanges++;
+
         void OnContentLoaded(object sender, RoutedEventArgs e)
         {
             ((ContentControl)sender).Loaded -= OnContentLoaded;
+            TableView.DiagCellLoadedMeasures++;
             Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         }
     }
@@ -139,6 +142,16 @@ public partial class TableViewCell : ContentControl
     protected override Size MeasureOverride(Size availableSize)
     {
         TableView.DiagCellMeasures++;
+
+        // An unbounded measure did not come from the layout pass — a row measures its cells against a
+        // real width. It came from the Loaded handler above, out of band, and it measures the content
+        // with no constraint at all. Counted apart so a frame full of them cannot be mistaken for a
+        // frame that was laying rows out.
+        if (double.IsInfinity(availableSize.Width))
+        {
+            TableView.DiagCellInfiniteMeasures++;
+        }
+
         _hasMeasured = true;
         var diagT0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var size = MeasureCore(availableSize, diagT0);
@@ -176,8 +189,16 @@ public partial class TableViewCell : ContentControl
             // work with no reader. It was the largest single cost of realizing a row: nineteen
             // columns meant nineteen extra full content measures per row, plus four dependency
             // property writes per cell to clear and restore the clamps around them.
+            //
+            // The width matters as much as the mode. ColumnAutoWidthMode defaults to Both and is a
+            // grid-wide setting, so a grid whose every column carries a literal width — the shape a
+            // dense list actually takes — kept paying for all of it: the mode said cells, no column
+            // asked, and the saving was left on the table for everyone who did not also think to
+            // set the mode. The pairing here is the one the rebaseline pass already uses
+            // (OnAutoWidthRebaselineTick): auto width AND a mode that measures cells.
             var autoSizeMode = Column.ColumnAutoWidthMode ?? TableView.ColumnAutoWidthMode;
-            if (autoSizeMode is TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both)
+            if (Column.Width.IsAuto
+                && autoSizeMode is TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both)
             {
                 #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
                 element.MaxWidth = double.PositiveInfinity;

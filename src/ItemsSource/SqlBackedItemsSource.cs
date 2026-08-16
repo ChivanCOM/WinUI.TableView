@@ -143,14 +143,6 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
     private int _count;
 
     /// <summary>
-    /// Above this absolute count delta, a refresh raises a single Reset instead
-    /// of per-index Add/Remove events. Per-index is right for a handful of live
-    /// records arriving; a filter/sort that swings the count by thousands would
-    /// otherwise fire O(delta) events on the UI thread and freeze the app.
-    /// </summary>
-    private const int BulkCountDeltaThreshold = 64;
-
-    /// <summary>
     /// Most recently requested row index — proxy for "where is the
     /// visible viewport anchored". Updated on every <see cref="this[int]"/>
     /// access, used by <see cref="RefreshCountAsync"/> to decide which
@@ -282,7 +274,28 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
     /// when the underlying store has changed, the host's filter
     /// context has changed, or the search text has moved.
     /// </summary>
-    public void Refresh()
+    public void Refresh() => Refresh(queryChanged: true);
+
+    /// <summary>
+    /// Re-asks the store.
+    /// </summary>
+    /// <param name="queryChanged">
+    /// Whether the QUESTION changed — a different sort, filter or search — as opposed to the answer
+    /// to the same question having moved because the store did.
+    ///
+    /// <para>It decides which of two very different refreshes this is. A changed question puts a
+    /// different row at every index, so the grid is told the collection reset and rebuilds against
+    /// it. An unchanged one usually leaves every index holding what it held (a track edited, a few
+    /// scanned in), and there the cached pages are re-fetched and patched in place instead: the
+    /// reader keeps their place, the containers keep their state, and only the rows that really
+    /// moved are re-bound. If the row COUNT turns out to have changed, the shape moved after all and
+    /// it falls back to the reset.</para>
+    ///
+    /// <para>Only the caller knows: the sort and filter descriptions live here and can be compared,
+    /// but a search box's text does not — it reaches the store through the host's own query
+    /// builder. Hence the parameter, and hence the safe default.</para>
+    /// </param>
+    public void Refresh(bool queryChanged)
     {
         if (_deferCounter > 0)
         {
@@ -296,14 +309,27 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
         oldCts.Cancel();
         oldCts.Dispose();
 
-        UnhookAll();
-        _pages.Clear();
-        _pageLru.Clear();
-        _pageLruNodes.Clear();
         _pagesInFlight.Clear();
 
+        // The pages a patch-in-place refresh will re-fetch. Held rather than dropped, because their
+        // indices are the ones the reader is looking at and the whole point is to hand those rows
+        // back without the grid noticing anything but new values.
+        var held = queryChanged ? null : _pages.Keys.ToArray();
+
+        // Whether there was anything to throw away. A refresh over an empty cache has discarded
+        // nothing the grid could be showing — see the guard on the reset in RefreshCountAsync.
+        var hadPages = _pages.Count > 0;
+
+        if (queryChanged)
+        {
+            UnhookAll();
+            _pages.Clear();
+            _pageLru.Clear();
+            _pageLruNodes.Clear();
+        }
+
         IsBusy = true;
-        _ = RefreshCountAsync(_cts.Token);
+        _ = RefreshCountAsync(_cts.Token, held, queryChanged, hadPages);
     }
 
     /// <summary>Sort descriptions live in <see cref="_sortDescriptions"/> — refreshing sort means re-fetching.</summary>
@@ -371,7 +397,8 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
 
     // ── Count / page fetch ──────────────────────────────────────────
 
-    private async Task RefreshCountAsync(CancellationToken ct)
+    private async Task RefreshCountAsync(
+        CancellationToken ct, int[]? heldPages = null, bool queryChanged = true, bool hadPages = false)
     {
         try
         {
@@ -384,59 +411,36 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
             if (newCount != oldCount)
             {
                 RaisePropertyChanged(nameof(Count));
-
-                // Tell the bound grid about the count delta so its row container
-                // manager grows / shrinks slots.
-                //
-                // Small delta (a few records arriving from a live sync): emit
-                // per-index Add/Remove so the existing containers re-bind without
-                // a full teardown.
-                //
-                // Large delta (a filter / sort that swings the count by thousands
-                // — e.g. unchecking one value drops 1,000,000 → 500,000): a SINGLE
-                // Reset. Firing O(delta) per-index events here runs on the UI
-                // thread and froze the app (hundreds of thousands of event raises),
-                // and the busy ring couldn't even paint. One Reset rebuilds only
-                // the realized viewport (bounded since virtualization recycles).
-                var delta = newCount > oldCount ? newCount - oldCount : oldCount - newCount;
-                if (delta > BulkCountDeltaThreshold)
-                {
-                    CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
-                        NotifyCollectionChangedAction.Reset));
-                    VectorChanged?.Invoke(this, new VectorChangedEventArgs(CollectionChange.Reset));
-                }
-                else if (newCount > oldCount)
-                {
-                    for (var i = oldCount; i < newCount; i++)
-                    {
-                        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
-                            NotifyCollectionChangedAction.Add, Placeholder, i));
-                        VectorChanged?.Invoke(this, new VectorChangedEventArgs(
-                            CollectionChange.ItemInserted, i));
-                    }
-                }
-                else
-                {
-                    for (var i = oldCount - 1; i >= newCount; i--)
-                    {
-                        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
-                            NotifyCollectionChangedAction.Remove, Placeholder, i));
-                        VectorChanged?.Invoke(this, new VectorChangedEventArgs(
-                            CollectionChange.ItemRemoved, i));
-                    }
-                }
             }
 
-            // Pre-fetch the page containing the most-recently accessed
-            // index — that's where the visible viewport is anchored.
-            // After it lands, per-row Replace events update only the
-            // visible cells. We deliberately do NOT raise Reset here:
-            // Reset is heavy in Uno's ListView at large item counts
-            // (it tears down recycled containers and can run a
-            // measurement pass proportional to the previously realized
-            // range), and unnecessary — ListView's existing containers
-            // re-bind to the new RecordRow when their indexed Replace
-            // event fires.
+            // Same question, same number of answers: the rows are almost all where they were, so the
+            // pages the reader is on are re-fetched and patched index by index. No reset, no rebind,
+            // no scroll restore — the grid never learns that anything structural happened, because
+            // nothing did.
+            if (heldPages is { Length: > 0 } && newCount == oldCount)
+            {
+                foreach (var pageIndex in heldPages)
+                {
+                    if (ct.IsCancellationRequested) return;
+                    await LoadPageAsync(pageIndex, ct).ConfigureAwait(true);
+                }
+
+                return;
+            }
+
+            // Otherwise the collection is a different collection. Anything still cached belongs to
+            // the old one.
+            if (heldPages is not null)
+            {
+                UnhookAll();
+                _pages.Clear();
+                _pageLru.Clear();
+                _pageLruNodes.Clear();
+            }
+
+            // Warm the page the viewport is anchored on BEFORE saying anything, so the grid's first
+            // read after the reset below finds real rows rather than placeholders it has to come
+            // back for.
             if (newCount > 0)
             {
                 var anchor    = Math.Clamp(_lastAccessedIndex, 0, newCount - 1);
@@ -452,8 +456,42 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
                 _pages[pageIndex] = buffer;
                 TouchLru(pageIndex);
                 HookPage(buffer);
+            }
 
-                RaisePageLoaded(offset, buffer);
+            // One Reset, whatever the count did.
+            //
+            // This used to fire only when the count MOVED — a Reset for a big swing, per-index
+            // Add/Remove for a small one, and nothing at all when the count came back the same. That
+            // last case is a re-sort, which is the one refresh that changes every row while changing
+            // no count at all: every cached page had already been thrown away, so the grid was
+            // holding nine thousand indices whose data was gone, had been told nothing, and had no
+            // reason to ask again. Only the anchor page above came back, because only it was
+            // re-fetched — hence a band of painted rows and a screenful of empty ones that never
+            // filled, for the rest of the session.
+            //
+            // The count was the wrong thing to key on: what changed is the CONTENTS, and a Reset is
+            // how a collection says so. The per-index events it replaced were a lie in any case —
+            // they reported new rows arriving at the END of the list, which in a sorted one is
+            // wherever they happen to sort.
+            //
+            // But only when something did change, and this guard is not a nicety. A reset re-points
+            // the grid's items source, which tears every container out of the visual tree; do that
+            // for a refresh that discarded nothing and found nothing, and a caller that retries —
+            // a library whose database is not open answers nought every time — has an unbreakable
+            // loop that destroys containers it never rebuilds, at whatever rate it retries. It
+            // presented as a black window and a pinned thread, with the grid's own counters all
+            // reading zero because no row was ever built.
+            var somethingChanged = newCount != oldCount        // the shape moved
+                                || hadPages                    // rows the grid may be showing were dropped
+                                || (queryChanged && newCount > 0); // same rows, different order
+
+            if (somethingChanged)
+            {
+                // Charged, and net of the layout it causes. A Reset is the single most expensive
+                // thing this source can say — the grid re-points its items source, every container
+                // leaves the tree, and the viewport is built again from nothing — so a stall line
+                // showing one is a stall line that has already named its own cause.
+                TableView.DiagCharge(ref TableView.DiagPageLandTicks, ref TableView.DiagPageLands, RaiseReset);
             }
         }
         catch (OperationCanceledException) { /* superseded by a newer refresh */ }
@@ -465,12 +503,45 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
         }
     }
 
+    // Loading every page up front, when every page fits the cache, was tried here and taken out.
+    // The idea was sound — below the cache's own size nothing is ever evicted, so the source could
+    // simply BE an in-memory one — but the cost lands in the worst possible place: every page
+    // materializes its rows and raises a patch per row, all of it on the UI thread, all of it while
+    // the grid is still doing its first fill. It read as a slow open and a stall that clears itself.
+    // Anything of this shape has to arrive on idle turns and stay quiet about pages nobody is
+    // looking at yet; PrefetchNeighbour is the cheap half of the same idea and does not.
+
     /// <summary>
     /// Schedules a fetch for the page containing <paramref name="pageIndex"/>
     /// if it is not already loaded or in flight. The fetch is async;
     /// callers receive the placeholder for now and a Replace
     /// notification per-row when the page lands.
     /// </summary>
+    /// <summary>
+    /// Starts the next page fetching while the reader is still on this one.
+    ///
+    /// <para>Without it a page boundary is a wall: the rows past it realize against a placeholder,
+    /// bind to nothing, and are re-bound a fetch later when the page lands — every row across that
+    /// boundary built twice, and a flash of empty cells in between. Reaching within a quarter-page
+    /// of an edge is enough warning to have the next one in hand before it is asked for, which is
+    /// the same rule <see cref="Tree.VirtualTreeModel"/> has always used and this source never
+    /// had.</para>
+    /// </summary>
+    private void PrefetchNeighbour(int pageIndex, int indexInPage)
+    {
+        var edge = _pageSize / 4;
+
+        if (indexInPage >= _pageSize - edge)
+        {
+            var next = pageIndex + 1;
+            if (next * _pageSize < _count) EnsurePageLoaded(next);
+        }
+        else if (indexInPage < edge && pageIndex > 0)
+        {
+            EnsurePageLoaded(pageIndex - 1);
+        }
+    }
+
     private void EnsurePageLoaded(int pageIndex)
     {
         if (_pages.ContainsKey(pageIndex))         return;
@@ -496,6 +567,14 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
             var rows = await _pageAsync(query, offset, limit, ct).ConfigureAwait(true);
             if (ct.IsCancellationRequested) return;
 
+            // Everything from here to the end of the method runs on the UI thread — the await was
+            // configured to come back to it — and it is a whole page's worth of work: subscribing to
+            // every row, and then raising two events per row for the entire page whether the reader
+            // can see that row or not. It happens between layout passes, so a grid's own prepare /
+            // measure / arrange counters report zero for the frame it eats.
+            TableView.DiagPageLands++;
+            var landT0 = Stopwatch.GetTimestamp();
+
             // Materialise into a fixed-size buffer so page-cache lookups
             // can index without bounds checks even if the host returned
             // fewer rows than asked (we just leave Placeholder for the
@@ -504,6 +583,13 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
             var buffer = new object?[limit];
             for (var i = 0; i < limit && i < rows.Count; i++) buffer[i] = rows[i];
             for (var i = rows.Count; i < limit; i++)          buffer[i] = Placeholder;
+
+            // A page being re-fetched over one already held (the patch-in-place refresh) leaves the
+            // rows it replaces subscribed to nothing, so let them go before the buffer does.
+            if (_pages.TryGetValue(pageIndex, out var replaced))
+            {
+                UnhookPage(replaced);
+            }
 
             _pages[pageIndex] = buffer;
             _pagesInFlight.Remove(pageIndex);
@@ -519,6 +605,8 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
             // page-loads only need to patch the specific indices that
             // changed from Placeholder to a real row.
             RaisePageLoaded(offset, buffer);
+
+            TableView.DiagPageLandTicks += Stopwatch.GetTimestamp() - landT0;
         }
         catch (OperationCanceledException)
         {
@@ -590,6 +678,7 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
             if (_pages.TryGetValue(pageIndex, out var page))
             {
                 TouchLru(pageIndex);
+                PrefetchNeighbour(pageIndex, indexInPage);
                 return page[indexInPage];
             }
 
@@ -597,6 +686,32 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
             return Placeholder;
         }
         set => throw new NotSupportedException("SqlBackedItemsSource is read-only.");
+    }
+
+    /// <summary>
+    /// The rows currently held in memory, in no particular order and
+    /// without the placeholders. A host that wants to poke every row it
+    /// can see — re-raise a property on each, repaint a mark — must ask
+    /// for these and not enumerate the source: <see cref="GetEnumerator"/>
+    /// walks all <see cref="Count"/> indices, and on a collection sized
+    /// in the millions that is a million yields for the twenty rows that
+    /// exist.
+    /// </summary>
+    public IEnumerable<object> CachedRows
+    {
+        get
+        {
+            foreach (var page in _pages.Values)
+            {
+                foreach (var row in page)
+                {
+                    if (row is not null && !ReferenceEquals(row, Placeholder))
+                    {
+                        yield return row;
+                    }
+                }
+            }
+        }
     }
 
     public bool Contains(object? item) => IndexOf(item) >= 0;

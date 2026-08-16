@@ -160,6 +160,18 @@ public partial class TableView : ListView
         var row = ContainerFromItem(sender) as TableViewRow;
 
         row?.EnsureCellsStyle(default, sender);
+
+        // Text columns write their value instead of binding it (see TableViewTextColumn), which
+        // trades a binding expression per cell per scrolled row for this: the one row that actually
+        // changed, re-read. An edit, a track finishing its analysis, a cloud state moving — rare,
+        // and cheap when it happens.
+        if (row is not null)
+        {
+            foreach (var cell in row.Cells)
+            {
+                cell.RefreshElement();
+            }
+        }
     }
 
     /// <summary>Diagnostics for the hoster's fling probe: container prepares per scroll hop
@@ -188,6 +200,83 @@ public partial class TableView : ListView
     public static long DiagInsertCellScans;
 
     /// <summary>
+    /// The work that happens BETWEEN layout passes, which the counters above cannot see and which a
+    /// stall line without them reports as an unexplained gap.
+    ///
+    /// <para>A grid over a paged source does most of its expensive work off the layout path: a page
+    /// lands and raises an event per row in it, the burst is drained on a dispatcher turn, the drain
+    /// re-points the source or re-seats the panel, and only then does anything measure. Every one of
+    /// those is a frame the reader lost with prepares, measures and arranges all reading zero — which
+    /// is exactly what the first report of this stall looked like.</para>
+    /// </summary>
+    public static long DiagContainerNews;
+    public static long DiagContainerNewTicks;
+    public static long DiagPageLands;
+    public static long DiagPageLandTicks;
+    public static long DiagRowEvents;
+    public static long DiagSourceResets;
+    public static long DiagPatches;
+    public static long DiagPatchTicks;
+    public static long DiagReseats;
+    public static long DiagReseatTicks;
+    public static long DiagRebinds;
+    public static long DiagRebindTicks;
+
+    /// <summary>
+    /// The leaf timings — the regions that are charged for their own time wherever they run. Anything
+    /// that can drive a layout pass synchronously (a rebind, a page landing, a burst drain) subtracts
+    /// the delta in these across itself, so its own figure is the time it spent on ITS work and the
+    /// same milliseconds are not counted twice in two buckets.
+    ///
+    /// <para>Cell measures are deliberately absent: they run inside a row measure and are reported as
+    /// a breakdown of it, not alongside it.</para>
+    /// </summary>
+    private static long DiagLeafTicks()
+        => DiagPrepareTicks + DiagRowMeasureTicks + DiagRowArrangeTicks + DiagContainerNewTicks;
+
+    /// <summary>
+    /// Runs <paramref name="body"/> and charges it to a bucket, net of any layout it caused.
+    /// </summary>
+    internal static void DiagCharge(ref long ticks, ref long count, Action body)
+    {
+        var t0 = Stopwatch.GetTimestamp();
+        var leaf0 = DiagLeafTicks();
+        try
+        {
+            body();
+        }
+        finally
+        {
+            count++;
+            ticks += Stopwatch.GetTimestamp() - t0 - (DiagLeafTicks() - leaf0);
+        }
+    }
+
+    /// <summary>
+    /// The grid the counters are actually about. They are static — one set for every TableView in the
+    /// app — but the watch below is started by whichever grid loads first, and reads its offset, its
+    /// scroll viewer and its item count. On a page holding two grids that is reliably the wrong one:
+    /// the first report of this stall read offset=0 moved=0 rows=0 on every line, because the grid
+    /// being scrolled was the second one and the one being asked was an empty queue.
+    ///
+    /// <para>Set by whichever grid last realized or measured a row, which during a scroll is the grid
+    /// doing the scrolling.</para>
+    /// </summary>
+    internal static TableView? DiagActiveGrid;
+
+    /// <summary>
+    /// A scrolling list that is NOT a TableView, reporting through the same watch: its name, where it
+    /// is, and how many rows it is over.
+    ///
+    /// <para>For weighing an alternative against this one. The watch measures the frame, not the
+    /// control, so pointing it at something else costs nothing and keeps the comparison honest — the
+    /// same threshold, the same clock, the same line. Every counter below stays at zero while it is
+    /// set, which is the point: whatever <c>rest</c> comes back as is the alternative's own cost, with
+    /// none of this control's work mixed into it.</para>
+    /// </summary>
+    public static Func<(string Name, double Offset, int Count)>? DiagExternalScroll;
+
+    /// <summary>
     /// What the last <see cref="ScrollRowIntoView"/> decided and what it decided it from — the row
     /// asked for, the offset arithmetic, and whether it jumped, declined, or was clamped short.
     ///
@@ -195,6 +284,26 @@ public partial class TableView : ListView
     /// jumped to the wrong place": both leave the same stack. Set by <see cref="JumpToRow"/>.</para>
     /// </summary>
     public static string DiagLastJump = "";
+
+    /// <summary>
+    /// Where the diagnostics write. Null sends them to stdout and to the debugger, which is fine for
+    /// a harness and no use at all inside a real app: an app launched from an IDE may have no
+    /// console attached, and its debug output may be filtered down to its own assemblies. Point this
+    /// at the host's logger and the lines land wherever the host's own lines do.
+    /// </summary>
+    public static Action<string>? DiagnosticsWriter;
+
+    private static void Report(string line)
+    {
+        if (DiagnosticsWriter is { } writer)
+        {
+            writer(line);
+            return;
+        }
+
+        Console.WriteLine(line);
+        System.Diagnostics.Debug.WriteLine(line);
+    }
 
     /// <summary>
     /// Watches for frames that never came. A timer ticking every few milliseconds cannot tick while
@@ -227,6 +336,54 @@ public partial class TableView : ListView
     private static long _stallPrepares, _stallPrepareTicks, _stallPostTicks, _stallMeasureTicks,
                         _stallCellTicks, _stallCells, _stallArrangeTicks, _stallArranges,
                         _stallLists, _stallRowIdx;
+    private static long _stallNews, _stallNewTicks, _stallLands, _stallLandTicks, _stallRowEvents,
+                        _stallResets, _stallPatches, _stallPatchTicks, _stallReseats,
+                        _stallReseatTicks, _stallRebinds, _stallRebindTicks;
+    private static long _stallAlloc;
+    private static int _stallGen0, _stallGen1, _stallGen2;
+
+    /// <summary>Total time this process has spent stopped for the collector. The DELTA across a
+    /// stalled frame is how much of that frame was the collector rather than anything that ran —
+    /// which collection COUNTS cannot say, a hundred cheap gen0s and one expensive gen2 pause
+    /// reading much the same. It is the difference between "the grid allocates too much" and "the
+    /// grid was not involved".</summary>
+    private static TimeSpan _stallGcPause;
+
+    /// <summary>
+    /// When the compositor last got a turn, and how many turns it got. The one thing that separates
+    /// the two ways a frame can be lost with every managed counter reading zero.
+    ///
+    /// <para>Renders during the stall means the thread WAS in the frame loop and the frame itself was
+    /// slow: laying out and painting a viewport is the cost, and no amount of making the grid's own
+    /// bookkeeping cheaper will touch it. No renders at all means the loop never got a turn — the
+    /// thread was held somewhere else entirely, and the grid is a bystander.</para>
+    /// </summary>
+    private static long _stallRenders, _stallLastRenderTick;
+    private static long _renderCount;
+    private static long _stallDrains, _stallDrainTicks;
+    private static long _stallCellsInf, _stallCellContent, _stallCellLoaded, _stallWheel, _stallTextSets;
+
+    /// <summary>How many paced scroll steps were let out, and what they cost. A step is one
+    /// <c>ChangeView</c>, and the pacer's whole premise is that a step fits in a frame; if it does
+    /// not, the budget collapses to its floor and the list crawls at three rows a frame however
+    /// hard the gesture was.</summary>
+    public static long DiagDrains;
+    public static long DiagDrainTicks;
+
+    /// <summary>Cells measured with no constraint, cells whose content was swapped, and the Loaded
+    /// handlers that turn the second into the first. A frame where these carry the cell count is a
+    /// frame spent re-measuring content out of band, not laying a viewport out.</summary>
+    /// <summary>Cell values actually written. The gap between this and the cells re-shown is what the
+    /// equality check saves: a scroll re-shows a great many cells whose text has not changed.</summary>
+    public static long DiagCellTextSets;
+
+    public static long DiagCellInfiniteMeasures;
+    public static long DiagCellContentChanges;
+    public static long DiagCellLoadedMeasures;
+
+    /// <summary>Wheel events delivered. The one counter that says whether a still list is a list
+    /// nobody is scrolling or a list that cannot be scrolled.</summary>
+    public static long DiagWheelEvents;
 
     private void StartStallWatch()
     {
@@ -238,6 +395,15 @@ public partial class TableView : ListView
         _stallLastTick = Stopwatch.GetTimestamp();
         Snapshot();
 
+        // The frame loop's own pulse. Everything the grid does in managed code is already counted;
+        // this counts the turns the compositor got, which is the only way to tell a frame the thread
+        // spent PAINTING from a frame the thread never reached.
+        Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += (_, _) =>
+        {
+            _renderCount++;
+            _stallLastRenderTick = Stopwatch.GetTimestamp();
+        };
+
         _stallTimer = DispatcherQueue.CreateTimer();
         _stallTimer.Interval = TimeSpan.FromMilliseconds(8);
         _stallTimer.IsRepeating = true;
@@ -247,30 +413,77 @@ public partial class TableView : ListView
             var elapsedMs = (now - _stallLastTick) * 1000 / Stopwatch.Frequency;
             _stallLastTick = now;
 
+            // The grid the counters are about, not the one that happened to load first. See
+            // DiagActiveGrid — asking the wrong grid is what made every line read offset=0 rows=0.
+            var grid = DiagActiveGrid ?? this;
+            var external = DiagExternalScroll?.Invoke();
+
             // How far the reader actually moved while the thread was busy. Rows realized far in
             // excess of the distance travelled are rows being built twice, not rows being reached.
-            var offset = _scrollViewer?.VerticalOffset ?? 0;
+            var offset = external is { } ext ? ext.Offset : grid._scrollViewer?.VerticalOffset ?? 0;
             var moved = offset - _stallLastOffset;
             _stallLastOffset = offset;
 
             if (elapsedMs >= StallThresholdMs)
             {
                 static long Ms(long ticks) => ticks * 1000 / Stopwatch.Frequency;
-                Console.WriteLine($"[stall] {elapsedMs}ms offset={offset:F0} moved={moved:F0} "
-                    + $"rows={Items?.Count ?? 0} "
-                    + $"prepares={DiagPrepares - _stallPrepares} prepMs={Ms(DiagPrepareTicks - _stallPrepareTicks)} "
-                    + $"postPrepMs={Ms(DiagPostPrepareTicks - _stallPostTicks)} "
-                    + $"rowMeasureMs={Ms(DiagRowMeasureTicks - _stallMeasureTicks)} "
-                    + $"cells={DiagCellMeasures - _stallCells} cellMs={Ms(DiagCellMeasureTicks - _stallCellTicks)} "
-                    + $"arranges={DiagRowArranges - _stallArranges} arrangeMs={Ms(DiagRowArrangeTicks - _stallArrangeTicks)} "
-                    + $"cellLists={DiagCellListBuilds - _stallLists} rowIdx={DiagRowIndexLookups - _stallRowIdx}");
+
+                var prepMs = Ms(DiagPrepareTicks - _stallPrepareTicks);
+                var newMs = Ms(DiagContainerNewTicks - _stallNewTicks);
+                var postPrepMs = Ms(DiagPostPrepareTicks - _stallPostTicks);
+                var measureMs = Ms(DiagRowMeasureTicks - _stallMeasureTicks);
+                var arrangeMs = Ms(DiagRowArrangeTicks - _stallArrangeTicks);
+                var landMs = Ms(DiagPageLandTicks - _stallLandTicks);
+                var patchMs = Ms(DiagPatchTicks - _stallPatchTicks);
+                var reseatMs = Ms(DiagReseatTicks - _stallReseatTicks);
+                var rebindMs = Ms(DiagRebindTicks - _stallRebindTicks);
+
+                // What the thread was doing that none of the buckets claimed. A large rest is not a
+                // shrug — it is the finding: the time went somewhere this instrument does not look
+                // yet, and the next bucket to add is whatever the app was doing on that turn.
+                var drainMs = Ms(DiagDrainTicks - _stallDrainTicks);
+                var rest = elapsedMs - (prepMs + newMs + postPrepMs + measureMs + arrangeMs
+                                        + landMs + patchMs + reseatMs + rebindMs + drainMs);
+
+                var own = string.IsNullOrEmpty(grid.Name) ? "?" : grid.Name;
+
+                // When something else is being watched, the grid still doing the work is named too.
+                // Without it an alternative can be credited with a table's numbers: a control that is
+                // not on screen reports no position and no rows, every counter below belongs to the
+                // table that IS on screen, and the line reads as one list that cannot scroll.
+                var gridName = external is { } extName ? $"{extName.Name}(work={own})" : own;
+                var rowCount = external is { } extRows ? extRows.Count : grid.Items?.Count ?? 0;
+
+                Report($"[stall] {elapsedMs}ms rest={rest}ms grid={gridName} "
+                    + $"offset={offset:F0} moved={moved:F0} rows={rowCount} "
+                    + $"| prepares={DiagPrepares - _stallPrepares} prepMs={prepMs} "
+                    + $"news={DiagContainerNews - _stallNews} newMs={newMs} postPrepMs={postPrepMs} "
+                    + $"| rowMeasureMs={measureMs} cells={DiagCellMeasures - _stallCells} cellMs={Ms(DiagCellMeasureTicks - _stallCellTicks)} "
+                    + $"textSets={DiagCellTextSets - _stallTextSets} "
+                    + $"cellsInf={DiagCellInfiniteMeasures - _stallCellsInf} "
+                    + $"cellContent={DiagCellContentChanges - _stallCellContent} cellLoaded={DiagCellLoadedMeasures - _stallCellLoaded} "
+                    + $"| arranges={DiagRowArranges - _stallArranges} arrangeMs={arrangeMs} "
+                    + $"| lands={DiagPageLands - _stallLands} landMs={landMs} "
+                    + $"rowEvents={DiagRowEvents - _stallRowEvents} resets={DiagSourceResets - _stallResets} "
+                    + $"| patches={DiagPatches - _stallPatches} patchMs={patchMs} "
+                    + $"reseats={DiagReseats - _stallReseats} reseatMs={reseatMs} "
+                    + $"rebinds={DiagRebinds - _stallRebinds} rebindMs={rebindMs} "
+                    + $"| wheel={DiagWheelEvents - _stallWheel} pendingPx={grid._pendingScroll:F0} "
+                    + $"drains={DiagDrains - _stallDrains} drainMs={drainMs} "
+                    + $"| renders={_renderCount - _stallRenders} "
+                    + $"sinceRenderMs={(_stallLastRenderTick == 0 ? -1 : (now - _stallLastRenderTick) * 1000 / Stopwatch.Frequency)} "
+                    + $"| gc={GC.CollectionCount(0) - _stallGen0}/{GC.CollectionCount(1) - _stallGen1}/{GC.CollectionCount(2) - _stallGen2} "
+                    + $"gcPauseMs={(long)(GC.GetTotalPauseDuration() - _stallGcPause).TotalMilliseconds} "
+                    + $"allocMB={(GC.GetTotalAllocatedBytes(precise: false) - _stallAlloc) / (1024 * 1024)} "
+                    + $"| cells/frame={(grid._rows.Count * grid.Columns.VisibleColumns.Count)} "
+                    + $"| cellLists={DiagCellListBuilds - _stallLists} rowIdx={DiagRowIndexLookups - _stallRowIdx}");
             }
 
             Snapshot();
         };
         _stallTimer.Start();
 
-        Console.WriteLine($"[stall] watching, reporting frames longer than {StallThresholdMs}ms");
+        Report($"[stall] watching, reporting frames longer than {StallThresholdMs}ms");
 
         static void Snapshot()
         {
@@ -284,6 +497,31 @@ public partial class TableView : ListView
             _stallArranges = DiagRowArranges;
             _stallLists = DiagCellListBuilds;
             _stallRowIdx = DiagRowIndexLookups;
+            _stallNews = DiagContainerNews;
+            _stallNewTicks = DiagContainerNewTicks;
+            _stallLands = DiagPageLands;
+            _stallLandTicks = DiagPageLandTicks;
+            _stallRowEvents = DiagRowEvents;
+            _stallResets = DiagSourceResets;
+            _stallPatches = DiagPatches;
+            _stallPatchTicks = DiagPatchTicks;
+            _stallReseats = DiagReseats;
+            _stallReseatTicks = DiagReseatTicks;
+            _stallRebinds = DiagRebinds;
+            _stallRebindTicks = DiagRebindTicks;
+            _stallGen0 = GC.CollectionCount(0);
+            _stallGen1 = GC.CollectionCount(1);
+            _stallGen2 = GC.CollectionCount(2);
+            _stallGcPause = GC.GetTotalPauseDuration();
+            _stallAlloc = GC.GetTotalAllocatedBytes(precise: false);
+            _stallRenders = _renderCount;
+            _stallDrains = DiagDrains;
+            _stallDrainTicks = DiagDrainTicks;
+            _stallCellsInf = DiagCellInfiniteMeasures;
+            _stallCellContent = DiagCellContentChanges;
+            _stallCellLoaded = DiagCellLoadedMeasures;
+            _stallWheel = DiagWheelEvents;
+            _stallTextSets = DiagCellTextSets;
         }
     }
 
@@ -301,6 +539,7 @@ public partial class TableView : ListView
     protected override void PrepareContainerForItemOverride(DependencyObject element, object item)
     {
         DiagPrepares++;
+        DiagActiveGrid = this;
         var diagT0 = System.Diagnostics.Stopwatch.GetTimestamp();
         base.PrepareContainerForItemOverride(element, item);
         DiagPrepareTicks += System.Diagnostics.Stopwatch.GetTimestamp() - diagT0;
@@ -318,7 +557,7 @@ public partial class TableView : ListView
             // Recovery materialization continues after the verified restore; with a warm page
             // cache no ItemChanged bursts arrive to drain the armed re-seats, so prepares do.
             _unoReseatBurstsLeft--;
-            ReseatPanelRows();
+            DiagCharge(ref DiagReseatTicks, ref DiagReseats, ReseatPanelRows);
         }
 #endif
 
@@ -383,11 +622,21 @@ public partial class TableView : ListView
     /// <inheritdoc/>
     protected override DependencyObject GetContainerForItemOverride()
     {
+        // A container BUILT, as against a container recycled. Timed separately from the prepare
+        // because they answer different questions: prepares scaling with the distance scrolled is
+        // virtualization working, and news doing the same is the recycler being defeated — every row
+        // a fresh control and a fresh template, which is the expensive half by a wide margin.
+        DiagContainerNews++;
+        DiagActiveGrid = this;
+        var diagT0 = Stopwatch.GetTimestamp();
+
         var row = new TableViewRow { TableView = this };
 
         // Set bindings for FontFamily and FontSize to propagate from TableView to TableViewRow
         row.SetBinding(FontFamilyProperty, new Binding { Path = new("TableView.FontFamily"), RelativeSource = new() { Mode = RelativeSourceMode.Self } });
         row.SetBinding(FontSizeProperty, new Binding { Path = new("TableView.FontSize"), RelativeSource = new() { Mode = RelativeSourceMode.Self } });
+
+        DiagContainerNewTicks += Stopwatch.GetTimestamp() - diagT0;
 
         // NOTE: do NOT add to _rows here. Containers are created once and then
         // recycled across many items; tracking on creation (without a matching
@@ -671,7 +920,7 @@ public partial class TableView : ListView
             var hopTarget = _unoFinalHopTarget;
             _unoFinalHopTarget = -1;
             svHop.ChangeView(null, hopTarget, null, disableAnimation: true);
-            ReseatPanelRows();
+            DiagCharge(ref DiagReseatTicks, ref DiagReseats, ReseatPanelRows);
         }
 #endif
         if (e.IsIntermediate || IsDragSelecting || _scrollViewer is null)
@@ -811,6 +1060,12 @@ public partial class TableView : ListView
     /// </summary>
     private void OnScrollContentPresenterPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
+        // Whether the reader is asking for anything at all. The offset cannot answer that: it only
+        // moves when the thread gets to move it, so a held thread reports a still list whether the
+        // wheel is turning or not. The events themselves are queued by the platform and delivered
+        // when the thread frees up, so a count of them across a stalled frame IS the gesture.
+        DiagWheelEvents++;
+
         var pointerPoint = e.GetCurrentPoint(this);
         var isShiftButton = e.KeyModifiers.HasFlag(VirtualKeyModifiers.Shift);
         var isHorizontalScroll = isShiftButton || pointerPoint.Properties.IsHorizontalMouseWheel;
@@ -833,14 +1088,55 @@ public partial class TableView : ListView
         // So the list travels no further per frame than it can draw, and what is left over is
         // carried into the next frame rather than dropped: the gesture arrives in full, a little
         // later, instead of arriving at once and freezing.
+        //
+        // Only for a flick. A wheel delivers a few dozen detents a second at most, and each one is a
+        // couple of rows the panel can draw inside its frame — there is nothing to pace. Pacing it
+        // anyway meant a wheel put pixels into a queue that drained at its own rate, so the list
+        // carried on moving after the hand stopped, and every turn of the wheel was a scroll the
+        // platform had not been allowed to perform. WheelGesture is what tells the two apart.
         if (MaxScrollRowsPerFrame > 0 && !isHorizontalScroll && _scrollViewer is not null)
         {
-            e.Handled = true;
-            ScrollByPixels(-pointerPoint.Properties.MouseWheelDelta / WheelUnitsPerLine * LinePixels);
+            if (IsFlickScroll(pointerPoint.Properties.MouseWheelDelta))
+            {
+                e.Handled = true;
+                ScrollByPixels(-pointerPoint.Properties.MouseWheelDelta / WheelUnitsPerLine * LinePixels);
+            }
+
+            // A wheel is left to the ScrollViewer, unhandled: it scrolls by the platform's own
+            // amount, immediately, and stops when the hand does.
         }
     }
 
-    /// <summary>How far the list may travel in one frame, in rows. Zero leaves scrolling alone.</summary>
+    private readonly WheelGesture _wheelGesture = new();
+    private long _lastWheelTimestamp;
+
+    /// <summary>
+    /// Whether the wheel event just delivered belongs to a gesture that has to be paced. The clock
+    /// is this method's own — the gap between events is the whole of what
+    /// <see cref="WheelGesture"/> needs from the outside, and taking it here keeps the decision
+    /// itself testable without one.
+    /// </summary>
+    private bool IsFlickScroll(int delta)
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var sinceLastMs = _lastWheelTimestamp == 0
+            ? double.PositiveInfinity
+            : (now - _lastWheelTimestamp) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        _lastWheelTimestamp = now;
+
+        return _wheelGesture.Observe(delta, sinceLastMs);
+    }
+
+    /// <summary>
+    /// The FEWEST rows a paced frame will travel, and the switch for pacing itself: zero leaves
+    /// scrolling alone entirely.
+    ///
+    /// <para>It used to be the most, which is what made a paced list feel slow — a number chosen for
+    /// the worst frame on the slowest content was then charged to every frame, including the ones
+    /// that could have delivered ten times as much. What a frame may deliver is now measured
+    /// (<see cref="_paceBudget"/>) and this is only the floor under it, so a list that cannot keep
+    /// up still moves rather than stalling.</para>
+    /// </summary>
     public double MaxScrollRowsPerFrame { get; set; }
 
     /// <summary>One wheel notch, as the platform reports it.</summary>
@@ -849,6 +1145,20 @@ public partial class TableView : ListView
     /// <summary>What a notch is worth in pixels — three lines, as a wheel usually scrolls.</summary>
     private const double LinePixels = 16;
 
+    /// <summary>The frame this is all trying to fit inside, in milliseconds.</summary>
+    private const double TargetFrameMs = 16;
+
+    /// <summary>How late a drain has to be before the frame it measures counts as overrun. A tick
+    /// cannot arrive while the thread is laying out, so its lateness IS the cost of what the last
+    /// one asked for.</summary>
+    private const double OverrunFrameMs = TargetFrameMs * 1.5;
+
+    /// <summary>What one frame is allowed to travel, in pixels, as it stands. Grows while frames
+    /// come back on time and shrinks when they do not; clamped between the floor
+    /// (<see cref="MaxScrollRowsPerFrame"/>) and one viewport every time it is used.</summary>
+    private double _paceBudget = double.PositiveInfinity;
+
+    private long _lastDrainAt;
     private double _pendingScroll;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _scrollDrainTimer;
 
@@ -886,30 +1196,84 @@ public partial class TableView : ListView
             if (Math.Abs(_pendingScroll) < 0.5)
             {
                 _pendingScroll = 0;
+                _lastDrainAt = 0;
                 _scrollDrainTimer?.Stop();
                 return;
             }
 
             var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? RowHeight + 1;
-            var cap = MaxScrollRowsPerFrame > 0 ? MaxScrollRowsPerFrame * pitch : double.MaxValue;
+            var budget = NextPaceBudget(pitch);
 
-            // Letting a large backlog through in one step was tried and is worse: past a viewport
-            // the layouter stops walking and jumps, but a jump is not cheap — it drops every
-            // realized row and rebuilds a whole viewport at the destination. Measured over the same
-            // four flicks, jumping puts the worst frame at 480ms against 179ms for crawling.
-            var step = Math.Clamp(_pendingScroll, -cap, cap);
+            // Further behind than a screen: take the whole backlog in one step rather than pacing
+            // through it. Past a viewport the panel stops walking row by row and re-seeds, and a
+            // re-seed is one viewport of rows whatever the distance — so a backlog this size is a
+            // fixed price paid once if it is taken at once, and that same price paid every frame if
+            // it is let out a screen at a time. Pacing is for keeping up with a gesture, not for
+            // grinding through one that has already outrun us.
+            var step = Math.Abs(_pendingScroll) > Math.Max(budget, sv.ViewportHeight)
+                ? _pendingScroll
+                : Math.Clamp(_pendingScroll, -budget, budget);
             var target = Math.Clamp(sv.VerticalOffset + step, 0, Math.Max(0, sv.ScrollableHeight));
 
             // Nothing left to give — at either end the rest of the gesture has nowhere to go.
             if (Math.Abs(target - sv.VerticalOffset) < 0.5)
             {
                 _pendingScroll = 0;
+                _lastDrainAt = 0;
                 _scrollDrainTimer?.Stop();
                 return;
             }
 
             _pendingScroll -= step;
+
+            // Charged, and net of the layout it causes. What is left in this bucket is what the
+            // scroll itself cost outside the grid's own measure and arrange.
+            var drainT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            var drainLeaf0 = DiagLeafTicks();
             sv.ChangeView(null, target, null, disableAnimation: true);
+            DiagDrains++;
+            DiagDrainTicks += System.Diagnostics.Stopwatch.GetTimestamp() - drainT0 - (DiagLeafTicks() - drainLeaf0);
+        }
+
+        /// <summary>
+        /// What this frame may travel, in pixels.
+        ///
+        /// <para>Three things decide it, and none of them is a number somebody picked. The CEILING
+        /// is one viewport, because a frame cannot show more than a screen; a gesture that has run
+        /// further ahead than that is not paced at all but taken in one step, which is the caller's
+        /// business. The FLOOR is <see cref="MaxScrollRowsPerFrame"/>, so a list that cannot keep up
+        /// still moves rather than stalling. Between them the budget is MEASURED: the drain timer
+        /// cannot tick while the thread is laying out, so a late tick is the last frame's cost, and
+        /// the budget backs off when frames overrun and opens up again when they stop.</para>
+        ///
+        /// <para>Which is the point of it. The number this replaced was one constant for every
+        /// frame, and it had to be small enough for the worst of them — the deep rows, the cold
+        /// page, the machine under load — so the other ninety-nine per cent were held to a crawl
+        /// they had no reason to be. Cheap rows now reach the ceiling within a few frames.</para>
+        /// </summary>
+        double NextPaceBudget(double pitch)
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+
+            if (_lastDrainAt != 0)
+            {
+                var frameMs = (now - _lastDrainAt) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+                // Multiplicative both ways, so a machine that falls behind backs off in a few frames
+                // rather than a few dozen, and one that was throttled by a slow patch of content is
+                // not held there for the rest of the gesture.
+                _paceBudget = frameMs > OverrunFrameMs
+                    ? _paceBudget * 0.6
+                    : _paceBudget * 1.4;
+            }
+
+            _lastDrainAt = now;
+
+            var floor = MaxScrollRowsPerFrame > 0 ? MaxScrollRowsPerFrame * pitch : pitch;
+            var ceiling = Math.Max(floor, sv.ViewportHeight);
+
+            _paceBudget = Math.Clamp(_paceBudget, floor, ceiling);
+            return _paceBudget;
         }
     }
 
@@ -1355,6 +1719,15 @@ public partial class TableView : ListView
 
     private void OnUnoVectorChanged(object? sender, IVectorChangedEventArgs e)
     {
+        // How much the source is SAYING, as against how much of it is worth hearing. A paged source
+        // raises one of these per row in the page it just fetched — two hundred for a viewport of
+        // twenty — and each one arrives on the UI thread whether the row is realized or not.
+        DiagRowEvents++;
+        if (e.CollectionChange is CollectionChange.Reset)
+        {
+            DiagSourceResets++;
+        }
+
         // Accumulate the burst's change kinds until the dispatcher drains it.
         if (_unoBurstNeedsRebind)
         {
@@ -1450,25 +1823,25 @@ public partial class TableView : ListView
             {
                 _unoBurstNeedsRebind = false;
                 _unoChangedIndices.Clear();
-                RebindBaseItemsSource();
+                DiagCharge(ref DiagRebindTicks, ref DiagRebinds, RebindBaseItemsSource);
                 return;
             }
 
             var changedIndices = new HashSet<int>(_unoChangedIndices);
             _unoChangedIndices.Clear();
-            PatchRealizedRows(changedIndices);
+            DiagCharge(ref DiagPatchTicks, ref DiagPatches, () => PatchRealizedRows(changedIndices));
 
             if (_unoShiftReseat)
             {
                 _unoShiftReseat = false;
-                ReseatPanelRows();
+                DiagCharge(ref DiagReseatTicks, ref DiagReseats, ReseatPanelRows);
                 ItemsPanelRoot?.InvalidateMeasure();
             }
 
             if (_unoReseatBurstsLeft > 0)
             {
                 _unoReseatBurstsLeft--;
-                ReseatPanelRows();
+                DiagCharge(ref DiagReseatTicks, ref DiagReseats, ReseatPanelRows);
             }
         });
     }
