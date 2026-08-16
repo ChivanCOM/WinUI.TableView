@@ -1217,7 +1217,15 @@ public partial class TableView : ListView
             // fixed price paid once if it is taken at once, and that same price paid every frame if
             // it is let out a screen at a time. Pacing is for keeping up with a gesture, not for
             // grinding through one that has already outrun us.
-            var step = Math.Abs(_pendingScroll) > Math.Max(budget, sv.ViewportHeight)
+            //
+            // But only once the budget has grown to a screen, which is the case that argument is
+            // about. It says nothing about a budget of three rows, and a fling is a screen or two
+            // ahead by its nature — so on content that cannot deliver a screen a frame this fired on
+            // every drain and the pacer was not pacing anything at all. The stall lines had the
+            // budget converged on seventy-eight pixels and the step taking nine hundred.
+            var canReseedCheaply = budget >= sv.ViewportHeight;
+
+            var step = canReseedCheaply && Math.Abs(_pendingScroll) > budget
                 ? _pendingScroll
                 : Math.Clamp(_pendingScroll, -budget, budget);
             var target = Math.Clamp(sv.VerticalOffset + step, 0, Math.Max(0, sv.ScrollableHeight));
