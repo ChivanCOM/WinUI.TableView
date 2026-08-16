@@ -19,6 +19,9 @@
     <Compile Include="..\src\Tree\TreeGridFlattener.cs" />
     <Compile Include="..\src\Tree\VirtualTreeModel.cs" />
     <Compile Include="..\src\Tree\ColumnStrip.cs" />
+    <!-- Pure .NET as well: where a light row puts its text and its rules is arithmetic over the
+         column widths, with no element in sight. -->
+    <Compile Include="..\src\Tree\LightRowStrip.cs" />
     <!-- Pure .NET as well: whether a scroll is a wheel or a flick is decided from the deltas and
          their timing alone, with no pointer in sight. -->
     <Compile Include="..\src\Tree\WheelGesture.cs" />

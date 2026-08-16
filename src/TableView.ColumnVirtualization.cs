@@ -91,6 +91,11 @@ public partial class TableView
             return;
         }
 
+        // The column shape is the third thing a light row depends on, and this is the one place that
+        // provably runs after it settles — a column added, hidden, resized, or the grid itself
+        // resized, all arrive here.
+        InvalidateLightRows();
+
         var count = visible.Count;
         var frozen = Math.Clamp(FrozenColumnCount, 0, count);
 

@@ -256,6 +256,11 @@ public partial class TableView
     public static readonly DependencyProperty MaxColumnSyncRowsPerFrameProperty = DependencyProperty.Register(nameof(MaxColumnSyncRowsPerFrame), typeof(int), typeof(TableView), new PropertyMetadata(8));
 
     /// <summary>
+    /// Identifies the UseLightRows dependency property.
+    /// </summary>
+    public static readonly DependencyProperty UseLightRowsProperty = DependencyProperty.Register(nameof(UseLightRows), typeof(bool), typeof(TableView), new PropertyMetadata(false, OnUseLightRowsChanged));
+
+    /// <summary>
     /// Identifies the RowDetailsVisibilityMode dependency property.
     /// </summary>
     public static readonly DependencyProperty RowDetailsVisibilityModeProperty = DependencyProperty.Register(nameof(RowDetailsVisibilityMode), typeof(TableViewRowDetailsVisibilityMode), typeof(TableView), new PropertyMetadata(TableViewRowDetailsVisibilityMode.VisibleWhenExpanded, OnRowDetailsVisibilityModeChanged));
@@ -884,6 +889,25 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets whether a row draws its columns directly instead of building a cell for each.
+    ///
+    /// <para>Off by default, and it only takes on a grid that is read-only, selects whole rows, and
+    /// has no column that sizes itself by measuring its cells. Under it a row holds one TextBlock per
+    /// text column and one line for all its rules, in place of a templated control per column: about
+    /// nineteen elements a row where a hundred and nineteen stood. Columns that are not plain text —
+    /// a template column, a check box, the tree column — keep a real cell, so the two mix freely.</para>
+    ///
+    /// <para>What a light row gives up is everything a cell carries: <see cref="CellStyle"/>, the
+    /// cell hover, cell selection and cell editing. See <see cref="TableViewColumn.CanRenderAsText"/>
+    /// for what makes a column eligible.</para>
+    /// </summary>
+    public bool UseLightRows
+    {
+        get => (bool)GetValue(UseLightRowsProperty);
+        set => SetValue(UseLightRowsProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets the visibility mode of the row details.
     /// </summary>
     public TableViewRowDetailsVisibilityMode RowDetailsVisibilityMode
@@ -1023,6 +1047,7 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.InvalidateLightRows();   // read-only is half of what makes a row light
             tableView.OnIsReadOnlyChanged(e);
 
             if (!tableView.IsReadOnly) return;
@@ -1114,6 +1139,8 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.InvalidateLightRows();   // the other half
+
             if (tableView.SelectionUnit is TableViewSelectionUnit.Row or TableViewSelectionUnit.CellWithRow)
             {
                 tableView.SelectedCellRanges.Clear();

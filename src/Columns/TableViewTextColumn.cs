@@ -79,6 +79,22 @@ public partial class TableViewTextColumn : TableViewBoundColumn
     /// so the compiled getter behind <see cref="TableViewColumn.GetCellContent"/> can read it.</summary>
     private bool CanReadDirectly => !string.IsNullOrWhiteSpace(PropertyPath);
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// A text column is the one kind a light row can draw itself: a string in a TextBlock, which is
+    /// what this column generates anyway. It steps back where the cell around it was doing something
+    /// — a style on the element, a style chosen per row, a tooltip per row — because a panel drawing
+    /// text blocks has nowhere to put any of that, and silently dropping it would be worse than
+    /// keeping the cell.
+    /// </remarks>
+    public override bool CanRenderAsText => CanReadDirectly
+        && ElementStyle is null
+        && ConditionalCellStyles.Count == 0
+        && GetCellToolTip is null;
+
+    /// <inheritdoc/>
+    public override string GetCellText(object? dataItem) => TextFor(dataItem);
+
     private string TextFor(object? dataItem) => GetCellContent(dataItem)?.ToString() ?? string.Empty;
 
     /// <summary>

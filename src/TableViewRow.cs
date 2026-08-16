@@ -167,10 +167,9 @@ public partial class TableViewRow : ListViewItem
         }
         else
         {
-            foreach (var cell in Cells)
-            {
-                cell.RefreshElement();
-            }
+            // On the light path this is one call for the whole row rather than a RefreshElement per
+            // cell: the panel writes each column's value straight into the TextBlock showing it.
+            RefreshCells(newContent);
         }
 
         RowPresenter?.InvalidateMeasure(); // The cells presenter does not measure every time.
@@ -189,6 +188,52 @@ public partial class TableViewRow : ListViewItem
         {
             TableView.SelectionStartRowIndex = Index;
         }
+
+        SelectOnPress(e);
+    }
+
+    /// <summary>
+    /// Selects this row on a press, for a row that has no cells to be pressed.
+    ///
+    /// <para>Every pointer-driven selection in this grid runs through
+    /// <see cref="TableViewCell.OnPointerPressed"/> and <see cref="TableViewCell.OnTapped"/> —
+    /// <see cref="TableView.UpdateBaseSelectionMode"/> forces the base ListView's own selection off,
+    /// so nothing else does it. A light row has no cell, and without this it would not select at
+    /// all.</para>
+    ///
+    /// <para>On the press rather than on the tap, which is the one difference from the cell's path.
+    /// A tap is not raised at all once the pointer wanders a few pixels while the button is down —
+    /// the gesture becomes a manipulation — and the cell covers that case from
+    /// <see cref="TableViewCell.OnManipulationDelta"/>, which is also where it drag-selects. A row
+    /// must not take manipulations: this grid can drag its items OUT (CanDragItems), and that
+    /// gesture is the same one.</para>
+    /// </summary>
+    private void SelectOnPress(PointerRoutedEventArgs e)
+    {
+        if (!IsLight || TableView is not { } tableView)
+        {
+            return;
+        }
+
+        // A right press opens a context menu. Moving the selection under it would throw away the
+        // very rows the menu is about to act on (see TableViewCell.OnPointerPressed).
+        if (e.GetCurrentPoint(this).Properties.IsRightButtonPressed)
+        {
+            return;
+        }
+
+        // e.KeyModifiers, never the tracked key state: the latter goes stale when the app is
+        // switched away mid-modifier, turning every later click into a shift-click.
+        var shift = e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Shift);
+        var ctrl = e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Control)
+#if !WINDOWS
+                   || e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Windows)   // macOS: cmd-click
+#endif
+                   ;
+
+        // Column -1: a row, not a cell in it. Same slot the context menu already selects with.
+        tableView.MakeSelection(new TableViewCellSlot(Index, -1), shift, ctrl);
+        tableView.LastSelectionUnit = TableViewSelectionUnit.Row;
     }
 
     /// <inheritdoc/>
@@ -247,6 +292,14 @@ public partial class TableViewRow : ListViewItem
             return;
         }
 
+        if (IsLight)
+        {
+            // The light panel takes the row's height from the grid rather than from its children,
+            // so re-showing the item is what makes it read the new one.
+            RowPresenter?.ShowLightCells(Content);
+            return;
+        }
+
         foreach (var cell in Cells)
         {
             cell.Height = TableView.RowHeight;
@@ -267,12 +320,50 @@ public partial class TableViewRow : ListViewItem
 
         if (RowPresenter is not null && _ensureCells)
         {
+            if (IsLight)
+            {
+                RowPresenter.EnsureLightCells();
+                AdoptColumnGeometry();                  // which is what brings the panel in line
+                RowPresenter.ShowLightCells(Content);
+                _ensureCells = false;
+                return;
+            }
+
             RowPresenter.ClearCells();
             ClearParkedCells();
 
             AddCells(TableView.Columns.VisibleColumns);
             AdoptColumnGeometry();
             _ensureCells = false;
+        }
+    }
+
+    /// <summary>Whether this row draws its columns itself rather than building a cell for each.</summary>
+    internal bool IsLight => TableView?.AreRowsLight is true;
+
+    /// <summary>Builds this light row's set of columns again and fills it, for when the columns
+    /// themselves moved: one hidden, one resized, one dragged somewhere else.</summary>
+    private void RefreshLightColumns()
+    {
+        AdoptColumnGeometry();
+        RowPresenter?.ShowLightCells(Content);
+    }
+
+    /// <summary>
+    /// Re-reads this row's values from the item it is showing, for when that item says one of them
+    /// changed. Text columns write their value rather than bind it, so nothing else would notice.
+    /// </summary>
+    internal void RefreshCells(object? item)
+    {
+        if (IsLight)
+        {
+            RowPresenter?.ShowLightCells(item);
+            return;
+        }
+
+        foreach (var cell in Cells)
+        {
+            cell.RefreshElement();
         }
     }
 
@@ -302,6 +393,12 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private void OnColumnsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+        if (IsLight)
+        {
+            RefreshLightColumns();
+            return;
+        }
+
         if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> newItems)
         {
             AddCells(newItems.Where(x => x.Visibility == Visibility.Visible));
@@ -325,6 +422,28 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private void OnColumnPropertyChanged(object? sender, TableViewColumnPropertyChangedEventArgs e)
     {
+        if (IsLight)
+        {
+            // Every branch below reaches into a cell to change one thing about it. A light row has no
+            // cell to reach into for its text columns: where the columns are and what they say is
+            // worked out from the collection each time it is asked. So all of these are the same
+            // answer — ask again.
+            //
+            // IsReadOnly is not among them: a grid that is not read-only has no light rows to begin
+            // with, which is what the gate says.
+            if (e.PropertyName is nameof(TableViewColumn.Visibility)
+                or nameof(TableViewColumn.Order)
+                or nameof(TableViewColumn.IsFrozen)
+                or nameof(TableViewColumn.ActualWidth)
+                or nameof(TableViewColumn.CellStyle)
+                or nameof(TableViewBoundColumn.ElementStyle))
+            {
+                RefreshLightColumns();
+            }
+
+            return;
+        }
+
         if (e.PropertyName is nameof(TableViewColumn.Visibility))
         {
             if (e.Column.Visibility == Visibility.Visible)
@@ -467,6 +586,13 @@ public partial class TableViewRow : ListViewItem
             return;
         }
 
+        if (IsLight)
+        {
+            AdoptColumnGeometry();
+            RowPresenter.ShowLightCells(Content);
+            return;
+        }
+
         SyncCellsCore();
         AdoptColumnGeometry();
     }
@@ -478,6 +604,14 @@ public partial class TableViewRow : ListViewItem
         if (TableView is null || RowPresenter is null)
         {
             return;
+        }
+
+        if (IsLight)
+        {
+            // A light row keeps its own record of where each column sits, because it arranges them
+            // rather than stacking them. A width that moved has to reach that record before the row
+            // takes on the geometry describing it, or every column lands under the wrong header.
+            RowPresenter.SyncLightCells();
         }
 
         RowPresenter.CellsInset = TableView.ColumnRangeInset;

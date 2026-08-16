@@ -165,13 +165,7 @@ public partial class TableView : ListView
         // trades a binding expression per cell per scrolled row for this: the one row that actually
         // changed, re-read. An edit, a track finishing its analysis, a cloud state moving — rare,
         // and cheap when it happens.
-        if (row is not null)
-        {
-            foreach (var cell in row.Cells)
-            {
-                cell.RefreshElement();
-            }
-        }
+        row?.RefreshCells(sender);
     }
 
     /// <summary>Diagnostics for the hoster's fling probe: container prepares per scroll hop
@@ -451,6 +445,12 @@ public partial class TableView : ListView
                 // Without it an alternative can be credited with a table's numbers: a control that is
                 // not on screen reports no position and no rows, every counter below belongs to the
                 // table that IS on screen, and the line reads as one list that cannot scroll.
+                // Which path drew the rows, on every line. The whole point of the light path is that
+                // the same gesture on the same grid produces different numbers, and a run whose
+                // opt-in silently did not take (see TableView.LightRows) would otherwise read as the
+                // light path having bought nothing.
+                own += grid.AreRowsLight ? "(light)" : "";
+
                 var gridName = external is { } extName ? $"{extName.Name}(work={own})" : own;
                 var rowCount = external is { } extRows ? extRows.Count : grid.Items?.Count ?? 0;
 

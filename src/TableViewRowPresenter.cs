@@ -432,6 +432,9 @@ public partial class TableViewRowPresenter : Control
         {
             cell.EnsureGridLines();
         }
+
+        _lightFrozen?.EnsureGridLines();
+        _lightScrollable?.EnsureGridLines();
     }
 
     internal double GetDetailsContentHeight()
@@ -557,7 +560,59 @@ public partial class TableViewRowPresenter : Control
     {
         _frozenCellsPanel?.Children.Clear();
         _scrollableCellsPanel?.Children.Clear();
+        _lightFrozen = null;
+        _lightScrollable = null;
         InvalidateCells();
+    }
+
+    /// <summary>
+    /// The two panels a light row draws through, one per section, in place of the stacks of cells.
+    ///
+    /// <para>They sit INSIDE the same two stack panels the cells used to, as the single child of
+    /// each. Everything the presenter's arrange does — the horizontal offset, the inset for the
+    /// columns skipped, the clip that stops the scrollable half sliding under the frozen one — is
+    /// then unchanged and unduplicated, which is the point: the light path is a different way of
+    /// filling a row, not a different way of placing one.</para>
+    /// </summary>
+    private TableViewLightCellsPanel? _lightFrozen;
+
+    /// <inheritdoc cref="_lightFrozen"/>
+    private TableViewLightCellsPanel? _lightScrollable;
+
+    /// <summary>Builds the light panels, if this row is drawing that way and has not got them yet.</summary>
+    internal void EnsureLightCells()
+    {
+        if (_lightScrollable is not null || TableViewRow is not { } row)
+        {
+            return;
+        }
+
+        // Takes out whatever was there: the dummy TextBlock the template ships with, or a set of
+        // cells from before the grid was switched over.
+        ClearCells();
+
+        _lightFrozen = new TableViewLightCellsPanel();
+        _lightFrozen.Attach(row, frozen: true);
+        _frozenCellsPanel?.Children.Add(_lightFrozen);
+
+        _lightScrollable = new TableViewLightCellsPanel();
+        _lightScrollable.Attach(row, frozen: false);
+        _scrollableCellsPanel?.Children.Add(_lightScrollable);
+    }
+
+    /// <summary>Brings the light panels in line with the columns on screen.</summary>
+    internal void SyncLightCells()
+    {
+        _lightFrozen?.Sync();
+        _lightScrollable?.Sync();
+        InvalidateCells();   // a template column may have come or gone with the range
+    }
+
+    /// <summary>Puts an item's values into the light panels.</summary>
+    internal void ShowLightCells(object? item)
+    {
+        _lightFrozen?.Show(item);
+        _lightScrollable?.Show(item);
     }
 
     /// <summary>
@@ -575,6 +630,15 @@ public partial class TableViewRowPresenter : Control
     private IReadOnlyList<TableViewCell> BuildCells()
     {
         TableView.DiagCellListBuilds++;
+
+        // A light row holds a cell only for the columns it could not draw as text — a template
+        // column, the tree column. Everything that walks this list therefore acts on those and
+        // no-ops on the rest, which is what makes a mixed row work.
+        if (_lightScrollable is not null)
+        {
+            return [.. _lightFrozen?.Cells ?? [], .. _lightScrollable.Cells];
+        }
+
         return
         [.. _frozenCellsPanel?.Children.OfType<TableViewCell>() ?? [],
          .. _scrollableCellsPanel?.Children.OfType<TableViewCell>() ?? []];

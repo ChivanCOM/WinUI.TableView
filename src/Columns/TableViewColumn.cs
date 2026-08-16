@@ -130,6 +130,24 @@ public abstract partial class TableViewColumn : DependencyObject
     }
 
     /// <summary>
+    /// FOBO fork addition. Whether this column's display is a plain run of text, so a light row can
+    /// draw it with a TextBlock of its own instead of building a cell for it.
+    ///
+    /// <para>False by default: a column that answers yes gives up everything a cell carries — the
+    /// element style, the conditional cell styles, the per-row tooltip, the hover and selection
+    /// layers — so only a column that provably needs none of them should say so. Every other column
+    /// keeps a real cell on the light path, which is what lets the two be mixed in one row.</para>
+    /// </summary>
+    public virtual bool CanRenderAsText => false;
+
+    /// <summary>
+    /// The text a light row shows for this column. Only asked of a column that says
+    /// <see cref="CanRenderAsText"/>.
+    /// </summary>
+    /// <param name="dataItem">The data item.</param>
+    public virtual string GetCellText(object? dataItem) => GetCellContent(dataItem)?.ToString() ?? string.Empty;
+
+    /// <summary>
     /// Gets the clipboard content of the cell for the specified data item.
     /// </summary>
     /// <param name="dataItem">The data item.</param>
