@@ -469,6 +469,7 @@ public partial class TableView : ListView
                     + $"reseats={DiagReseats - _stallReseats} reseatMs={reseatMs} "
                     + $"rebinds={DiagRebinds - _stallRebinds} rebindMs={rebindMs} "
                     + $"| wheel={DiagWheelEvents - _stallWheel} pendingPx={grid._pendingScroll:F0} "
+                    + $"pace={(double.IsFinite(grid._paceBudget) ? grid._paceBudget.ToString("F0") : "-")} "
                     + $"drains={DiagDrains - _stallDrains} drainMs={drainMs} "
                     + $"| renders={_renderCount - _stallRenders} "
                     + $"sinceRenderMs={(_stallLastRenderTick == 0 ? -1 : (now - _stallLastRenderTick) * 1000 / Stopwatch.Frequency)} "
@@ -1261,16 +1262,32 @@ public partial class TableView : ListView
         {
             var now = System.Diagnostics.Stopwatch.GetTimestamp();
 
+            // Opened at the floor rather than at the ceiling. A budget that starts unbounded gives
+            // the first frame of every gesture a whole viewport of rows to realize, which is the
+            // most expensive frame there is — and it hands it out before a single frame has been
+            // timed, so it is not a measurement, it is a guess that is wrong once per gesture.
+            if (double.IsNaN(_paceBudget) || double.IsInfinity(_paceBudget))
+            {
+                _paceBudget = MaxScrollRowsPerFrame > 0 ? MaxScrollRowsPerFrame * pitch : pitch;
+            }
+
             if (_lastDrainAt != 0)
             {
                 var frameMs = (now - _lastDrainAt) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
-                // Multiplicative both ways, so a machine that falls behind backs off in a few frames
-                // rather than a few dozen, and one that was throttled by a slow patch of content is
-                // not held there for the rest of the gesture.
+                // Down by a factor, up by a row. Multiplicative both ways — which is what this was —
+                // does not settle anywhere: one overrun takes a fifth off the budget and the two
+                // cheap frames that follow put it all back, so the budget spends the whole gesture
+                // oscillating around the ceiling and every third frame is a long one. The stall
+                // lines said so plainly: a frame prepared six rows and took 41ms, or fifty-four and
+                // took 149, with nothing in between.
+                //
+                // Additive increase against multiplicative decrease is the standard answer to
+                // exactly this, and for the same reason: it converges on the largest budget the
+                // content can actually deliver instead of repeatedly overshooting it.
                 _paceBudget = frameMs > OverrunFrameMs
                     ? _paceBudget * 0.6
-                    : _paceBudget * 1.4;
+                    : _paceBudget + pitch;
             }
 
             _lastDrainAt = now;

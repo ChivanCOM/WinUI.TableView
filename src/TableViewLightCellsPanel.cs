@@ -49,12 +49,17 @@ internal sealed partial class TableViewLightCellsPanel : Panel
     private double _width;
     private (int Start, int End, int Count, double Total, double Rule) _rulesKey = (-1, -1, -1, double.NaN, double.NaN);
 
-    /// <summary>One column this panel is holding, and whichever element shows it.</summary>
+    /// <summary>
+    /// One column this panel is holding, and whichever of the three things shows it: a TextBlock
+    /// for a plain value, the column's own element for a template that needs no cell around it, or
+    /// a real cell for a column that genuinely wants one.
+    /// </summary>
     private struct Entry
     {
         public TableViewColumn Column;
         public LightRowStrip.Cell Place;
         public TextBlock? Text;
+        public FrameworkElement? Element;
         public TableViewCell? Cell;
     }
 
@@ -208,6 +213,11 @@ internal sealed partial class TableViewLightCellsPanel : Panel
                 entry.Text = TakeTextBlock();
                 Children.Add(entry.Text);
             }
+            else if (column.CanRenderWithoutCell)
+            {
+                entry.Element = column.CreateCellFreeElement(_row?.Content);
+                Children.Add(entry.Element);
+            }
             else
             {
                 entry.Cell = new TableViewCell
@@ -237,6 +247,10 @@ internal sealed partial class TableViewLightCellsPanel : Panel
             {
                 Children.Remove(text);
                 GiveBackTextBlock(text);
+            }
+            else if (gone.Element is { } element)
+            {
+                Children.Remove(element);
             }
             else if (gone.Cell is { } cell)
             {
@@ -287,6 +301,10 @@ internal sealed partial class TableViewLightCellsPanel : Panel
                     TableView.DiagCellTextSets++;
                     text.Text = value;
                 }
+            }
+            else if (entry.Element is { } element)
+            {
+                entry.Column.RefreshCellFreeElement(element, item);
             }
             else
             {
@@ -434,6 +452,10 @@ internal sealed partial class TableViewLightCellsPanel : Panel
                 // width is the column's and the text is trimmed to it.
                 text.Measure(new Size(place.TextWidth, height));
             }
+            else if (entry.Element is { } element)
+            {
+                element.Measure(new Size(ContentWidth(place), height));
+            }
             else
             {
                 entry.Cell?.Measure(new Size(place.Width, height));
@@ -460,6 +482,12 @@ internal sealed partial class TableViewLightCellsPanel : Panel
                 // of its own choosing and a Stretch would fill it.
                 var textHeight = Math.Min(text.DesiredSize.Height, height);
                 text.Arrange(new Rect(place.TextX, (height - textHeight) / 2, place.TextWidth, textHeight));
+            }
+            else if (entry.Element is { } element)
+            {
+                // Up to the rule and no further, which is where the cell's own content presenter
+                // stopped: its grid gave the rule a column of its own.
+                element.Arrange(new Rect(place.X, 0, ContentWidth(place), height));
             }
             else
             {
@@ -692,6 +720,9 @@ internal sealed partial class TableViewLightCellsPanel : Panel
             return null;   // element not in the visual tree during container recycling
         }
     }
+
+    /// <summary>A column's width less the line down its right edge.</summary>
+    private static double ContentWidth(LightRowStrip.Cell place) => Math.Max(0, place.RuleX - place.X);
 
     /// <summary>The row's height, as the grid states it. A light row is uniform by construction —
     /// nothing in it can grow — so there is no content to measure against.</summary>

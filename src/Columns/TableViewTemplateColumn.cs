@@ -88,6 +88,50 @@ public partial class TableViewTemplateColumn : TableViewColumn
         cell.Content = GenerateElement(cell, dataItem);
     }
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// The cell around a template column does nothing this column needs: the template already draws
+    /// whatever the column shows, and the cell exists to be selected, hovered and edited. On a light
+    /// row it is none of those, so the panel hosts the ContentControl directly. It steps back where
+    /// the cell WAS doing something — a style chosen per row, a tooltip per row.
+    /// </remarks>
+    public override bool CanRenderWithoutCell => ConditionalCellStyles.Count == 0 && GetCellToolTip is null;
+
+    /// <inheritdoc/>
+    public override FrameworkElement CreateCellFreeElement(object? dataItem) => new ContentControl
+    {
+        // Content drives the DataContext inside the template; without it {Binding} in the
+        // CellTemplate resolves against null and every template binding silently yields nothing.
+        Content = dataItem,
+        VerticalContentAlignment = VerticalAlignment.Stretch,
+        HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        ContentTemplate = CellTemplateSelector?.SelectTemplate(dataItem) ?? CellTemplate
+    };
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Rebinds rather than rebuilds, for the reason <see cref="RefreshElement"/> gives: a row is
+    /// recycled precisely so its visuals survive and only the data behind them changes. Only a
+    /// genuinely different template — a selector that chose another one for this item — is worth
+    /// inflating again.
+    /// </remarks>
+    public override void RefreshCellFreeElement(FrameworkElement element, object? dataItem)
+    {
+        if (element is not ContentControl content)
+        {
+            return;
+        }
+
+        var template = CellTemplateSelector?.SelectTemplate(dataItem) ?? CellTemplate;
+
+        if (!Equals(content.ContentTemplate, template))
+        {
+            content.ContentTemplate = template;
+        }
+
+        content.Content = dataItem;
+    }
+
     /// <summary>
     /// Gets or sets the DataTemplate for the cell content.
     /// </summary>

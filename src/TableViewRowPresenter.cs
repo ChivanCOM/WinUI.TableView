@@ -84,6 +84,8 @@ public partial class TableViewRowPresenter : Control
                 _detailsPanel.RegisterPropertyChangedCallback(VisibilityProperty, OnDetailsPanelVisibilityChanged);
         }
 
+        DropUnusedChrome();
+
         TableViewRow?.EnsureCells();
         EnsureGridLines();
         SetRowHeaderBindings();
@@ -92,6 +94,67 @@ public partial class TableViewRowPresenter : Control
         SetRowHeaderWidth();
         SetRowDetailsVisibility();
         SetRowDetailsTemplate();
+    }
+
+    /// <summary>
+    /// Takes the parts this grid will never show out of the row altogether.
+    ///
+    /// <para>The template carries a row header, a chevron that opens a details pane, and the pane
+    /// itself: two controls with templates of their own, a grid to hold them and a content presenter.
+    /// A grid with no row headers and no details template collapses all of it and then builds it
+    /// again for every row, and a Grid still walks a collapsed child when it measures.</para>
+    ///
+    /// <para>Only on the light path. Elsewhere the cells dwarf this and the flexibility is worth
+    /// more than the elements: a grid can be given a details template at any point, and a row that
+    /// had already thrown the pane away would not know. A light row is by definition one whose
+    /// author has said what the grid is for.</para>
+    /// </summary>
+    private void DropUnusedChrome()
+    {
+        if (TableView is not { AreRowsLight: true } tableView)
+        {
+            return;
+        }
+
+        var wantsHeader = tableView.HeadersVisibility is TableViewHeadersVisibility.All or TableViewHeadersVisibility.Rows
+                          || tableView is ListView { SelectionMode: ListViewSelectionMode.Multiple };
+        var wantsDetails = tableView.RowDetailsTemplate is not null || tableView.RowDetailsTemplateSelector is not null;
+
+        if (!wantsHeader && !wantsDetails && _rowHeader?.Parent is Panel headerHost)
+        {
+            // The row header and the details chevron share a grid of their own; with both gone the
+            // grid goes too.
+            if (headerHost.Parent is Panel outer)
+            {
+                outer.Children.Remove(headerHost);
+            }
+            else
+            {
+                headerHost.Children.Clear();
+            }
+
+            _rowHeader = null;
+            _detailsToggleButton = null;
+        }
+
+        if (!wantsDetails && _detailsPanel is not null)
+        {
+            if (_detailsPanelVisibilityCallbackToken is long token)
+            {
+                _detailsPanel.UnregisterPropertyChangedCallback(VisibilityProperty, token);
+                _detailsPanelVisibilityCallbackToken = null;
+            }
+
+            _detailsPanel.SizeChanged -= OnDetailsPanelSizeChanged;
+
+            if (_detailsPanel.Parent is Panel host)
+            {
+                host.Children.Remove(_detailsPanel);
+            }
+
+            _detailsPanel = null;
+            _detailsPresenter = null;
+        }
     }
 
     /// <summary>
@@ -254,6 +317,13 @@ public partial class TableViewRowPresenter : Control
     internal void SetRowDetailsVisibility()
     {
         EnsureGridLines();
+
+        // Nothing to show and nothing to show it in — the pane was taken out of the row (see
+        // DropUnusedChrome), and every state below drives a storyboard that names it.
+        if (_detailsPanel is null && _detailsToggleButton is null)
+        {
+            return;
+        }
 
         var mode = TableView?.RowDetailsVisibilityMode;
         var hasTemplate = TableView?.RowDetailsTemplate is not null || TableView?.RowDetailsTemplateSelector is not null;

@@ -148,6 +148,29 @@ public abstract partial class TableViewColumn : DependencyObject
     public virtual string GetCellText(object? dataItem) => GetCellContent(dataItem)?.ToString() ?? string.Empty;
 
     /// <summary>
+    /// FOBO fork addition. Whether a light row can host this column's element directly, with no
+    /// <see cref="TableViewCell"/> around it.
+    ///
+    /// <para>Weaker than <see cref="CanRenderAsText"/> and worth having on its own: a column whose
+    /// display is a template rather than a string still cannot be drawn as text, but the cell around
+    /// that template is a templated control, a grid, three borders, a content presenter and a
+    /// rectangle — seven elements per row whose only job is to be selectable and editable, on a grid
+    /// that is neither.</para>
+    /// </summary>
+    public virtual bool CanRenderWithoutCell => false;
+
+    /// <summary>The element a light row hosts for this column. Only asked of a column that says
+    /// <see cref="CanRenderWithoutCell"/>.</summary>
+    /// <param name="dataItem">The data item.</param>
+    public virtual FrameworkElement CreateCellFreeElement(object? dataItem)
+        => throw new NotSupportedException($"{GetType().Name} does not render without a cell.");
+
+    /// <summary>Puts a new item into an element built by <see cref="CreateCellFreeElement"/>.</summary>
+    /// <param name="element">The element.</param>
+    /// <param name="dataItem">The data item.</param>
+    public virtual void RefreshCellFreeElement(FrameworkElement element, object? dataItem) { }
+
+    /// <summary>
     /// Gets the clipboard content of the cell for the specified data item.
     /// </summary>
     /// <param name="dataItem">The data item.</param>
