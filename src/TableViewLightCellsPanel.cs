@@ -19,11 +19,13 @@
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using System;
 using System.Collections.Generic;
 using Windows.Foundation;
+using WinUI.TableView.Extensions;
 
 namespace WinUI.TableView;
 
@@ -58,8 +60,23 @@ internal sealed partial class TableViewLightCellsPanel : Panel
 
     public TableViewLightCellsPanel()
     {
+        // A panel with no brush is not hit-testable in the gaps between its children, and the gaps
+        // are most of a row. The cell this replaces carried the same invisible fill from its default
+        // style, for the same reason.
+        Background = HitTestFill;
+        ManipulationMode = ManipulationModes.TranslateX | ManipulationModes.TranslateY;
+
         Children.Add(_rules);
+
+        PointerPressed += OnPointerPressed;
+        PointerReleased += OnPointerReleased;
+        PointerCaptureLost += OnPointerCaptureLost;
+        ManipulationDelta += OnManipulationDelta;
+        Tapped += OnTapped;
     }
+
+    /// <summary>One brush for every light panel in every grid, rather than one per row.</summary>
+    private static readonly SolidColorBrush HitTestFill = new(Microsoft.UI.Colors.Transparent);
 
     /// <summary>Ties the panel to the row it draws for.</summary>
     /// <param name="row">The row.</param>
@@ -447,6 +464,227 @@ internal sealed partial class TableViewLightCellsPanel : Panel
         _rules.Arrange(new Rect(0, 0, _width, height));
 
         return new Size(_width, height);
+    }
+
+    // ---- The gesture ----------------------------------------------------------------------------
+    //
+    // Every pointer-driven selection in this grid runs through TableViewCell: the base ListView's own
+    // selection is forced off (see TableView.UpdateBaseSelectionMode), so a click, a ctrl-click, a
+    // shift-click and the rubber-band sweep all reach MakeSelection from a cell's handlers and from
+    // nowhere else. A light row has no cell, so the panel that took the cells' place takes their
+    // handlers too — the same tree position, the same manipulation mode, the same thresholds, so
+    // whatever the ListView's own item-drag does with them it goes on doing.
+    //
+    // What differs is only the slot: column -1, a row rather than a cell in it.
+
+    /// <summary>Where the pointer went down, in the drag canvas's coordinates, so a click can be told
+    /// from a drag.</summary>
+    private Point? _dragOrigin;
+
+    /// <summary>How far the pointer has to travel before a press becomes a rubber-band sweep. Below
+    /// it the gesture is a click: it selects the row it landed on and nothing else.</summary>
+    private const double DragThreshold = 6;
+
+    private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (_row?.TableView is not { } tableView)
+        {
+            return;
+        }
+
+        // A right press opens a context menu, and is neither a click nor the start of a sweep. One
+        // part of what follows actively breaks the menu: the plain-click clear throws away the very
+        // rows the menu is about to act on.
+        if (e.GetCurrentPoint(this).Properties.IsRightButtonPressed)
+        {
+            return;
+        }
+
+        // e.KeyModifiers, never the tracked key state, on pointer paths: the latter goes stale when
+        // the app is switched away mid-modifier, turning every later click into a shift-click.
+        if (e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Shift))
+        {
+            return;
+        }
+
+        tableView.SelectionStartCellSlot = default;
+        tableView.SelectionStartRowIndex = _row.Index;
+
+#if !WINDOWS
+        // Uno: a moving click becomes a manipulation and Tapped never fires, so the click path
+        // cannot clear the previous selection — the press must.
+        tableView.OnSelectionDragStart(_row.Index, tableView.IsPointerCtrlDown);
+#endif
+        CapturePointer(e.Pointer);
+
+        // Armed, not engaged. A plain press-and-release below the threshold must never enter
+        // drag-selection state; the first real movement promotes it.
+        if (TransformPointToCanvas(e.GetCurrentPoint(this).Position) is { } canvasPoint)
+        {
+            _dragOrigin = canvasPoint;
+            tableView.ArmDragSelection(canvasPoint);
+        }
+    }
+
+    private void OnTapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (_row?.TableView is not { } tableView)
+        {
+            return;
+        }
+
+        // Tapped carries no modifiers of its own — the press and release that formed it stamped the
+        // grid's own record, so that is the live state here.
+        //
+        // Left unhandled deliberately: the row's own OnTapped follows it with the current row and the
+        // last selection unit, exactly as it followed the cell's, and a handled tap would put the
+        // double-tap that plays a track at risk.
+        tableView.MakeSelection(
+            new TableViewCellSlot(_row.Index, -1), tableView.IsPointerShiftDown, tableView.IsPointerCtrlDown);
+    }
+
+    private void OnManipulationDelta(object sender, ManipulationDeltaRoutedEventArgs e)
+    {
+        if (_row?.TableView is not { } tableView)
+        {
+            return;
+        }
+
+        // A stale capture is not a drag. Tabbing away to another window leaves the pointer captured
+        // with no release ever arriving, and the next move over the grid would carry on selecting as
+        // though the button were still down. The origin is cleared whenever a gesture really ends, so
+        // its absence means there is no gesture.
+        if (PointerCaptures?.Count is not > 0 || _dragOrigin is null)
+        {
+            return;
+        }
+
+        // A click is not a drag. Uno raises a manipulation for a pointer that wobbles a pixel while
+        // the button is down, and acting on those turned an ordinary click into a range selection.
+        if (!HasLeftTheClick(e.Position))
+        {
+            return;
+        }
+
+        tableView.BeginArmedDragSelection();   // idempotent: a no-op on every delta after the first
+
+        if (tableView.IsDragSelecting && TransformPointToCanvas(e.Position) is { } canvasPoint)
+        {
+            tableView.UpdateDragRectangleVisual(canvasPoint);
+        }
+
+        // When the pointer is outside the viewport this finds nothing, and the selection is carried
+        // on instead by the auto-scroll tick (TableView.SelectCellAtDragPoint, which answers for a
+        // light row too).
+        if (FindRow(e.Position) is { } row && row.Index != tableView.CurrentRowIndex)
+        {
+            tableView.MakeSelection(new TableViewCellSlot(row.Index, -1), true, tableView.IsPointerCtrlDown);
+        }
+    }
+
+    private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        // The right button's press was left alone above, so its release is too — handling it would
+        // eat the event the right-tap gesture, and with it the context menu, is formed from.
+        if (e.GetCurrentPoint(this).Properties.PointerUpdateKind
+            is Microsoft.UI.Input.PointerUpdateKind.RightButtonReleased)
+        {
+            return;
+        }
+
+        EndGesture();
+    }
+
+    private void OnPointerCaptureLost(object sender, PointerRoutedEventArgs e) => EndGesture();
+
+    /// <summary>Ends whatever gesture was in flight and releases the pointer, however it ended.</summary>
+    private void EndGesture()
+    {
+        _row?.TableView?.EndDragSelection();
+        ReleasePointerCaptures();
+        _dragOrigin = null;
+        _lastHitRow = null;
+    }
+
+    /// <summary>True once the pointer has moved far enough from where it went down to mean a sweep.</summary>
+    private bool HasLeftTheClick(Point position)
+    {
+        if (_dragOrigin is not { } origin || TransformPointToCanvas(position) is not { } point)
+        {
+            return true;   // no origin recorded (keyboard, programmatic): behave as before
+        }
+
+        var dx = point.X - origin.X;
+        var dy = point.Y - origin.Y;
+
+        return dx * dx + dy * dy >= DragThreshold * DragThreshold;
+    }
+
+    private Point? TransformPointToCanvas(Point position)
+    {
+        if (_row?.TableView?.DragRectangleCanvas is not { } canvas)
+        {
+            return null;
+        }
+
+        try
+        {
+            return TransformToVisual(canvas).TransformPoint(position);
+        }
+        catch (ArgumentException)
+        {
+            return null;   // not in the visual tree, mid-recycle
+        }
+    }
+
+    // A sweep hit-tests on every manipulation delta, and a full walk of the ScrollViewer's subtree
+    // per pointer move is the hot cost of dragging across a big viewport. Consecutive moves almost
+    // always stay inside the same row, so the last hit and its bounds are remembered and only
+    // re-tested once the pointer leaves them — invalidated when the view scrolls (the offsets are
+    // part of the cache) or the gesture ends (containers recycle between gestures).
+    private TableViewRow? _lastHitRow;
+    private Rect _lastHitBounds;
+    private double _lastHitVerticalOffset;
+    private double _lastHitHorizontalOffset;
+
+    /// <summary>The row under a point given in this panel's coordinates.</summary>
+    private TableViewRow? FindRow(Point position)
+    {
+        if (_row?.TableView is not { } tableView || tableView.FindDescendant<ScrollViewer>() is not { } scrollViewer)
+        {
+            return null;
+        }
+
+        try
+        {
+            var point = TransformToVisual(null).TransformPoint(position);
+
+            if (_lastHitRow is { IsLoaded: true } cached
+                && ReferenceEquals(cached.TableView, tableView)
+                && _lastHitVerticalOffset == scrollViewer.VerticalOffset
+                && _lastHitHorizontalOffset == tableView.HorizontalOffset
+                && _lastHitBounds.Contains(point))
+            {
+                return cached;
+            }
+
+            var row = TableView.RowFromHitTest(point, scrollViewer);
+
+            if (row is not null)
+            {
+                _lastHitRow = row;
+                _lastHitBounds = row.TransformToVisual(null)
+                                    .TransformBounds(new Rect(0, 0, row.ActualWidth, row.ActualHeight));
+                _lastHitVerticalOffset = scrollViewer.VerticalOffset;
+                _lastHitHorizontalOffset = tableView.HorizontalOffset;
+            }
+
+            return row;
+        }
+        catch (ArgumentException)
+        {
+            return null;   // element not in the visual tree during container recycling
+        }
     }
 
     /// <summary>The row's height, as the grid states it. A light row is uniform by construction —

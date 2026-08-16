@@ -3221,11 +3221,45 @@ public partial class TableView : ListView
             {
                 MakeSelection(cell.Slot, true, IsPointerCtrlDown);
             }
+            // A light row has no cell to be found. The sweep is a row-level one either way — the
+            // grid selects whole rows or the light path would not be on — so the row itself answers.
+            else if (cell is null && AreRowsLight
+                     && RowFromHitTest(screenPoint, _scrollViewer) is { } row
+                     && row.Index != CurrentRowIndex)
+            {
+                MakeSelection(new TableViewCellSlot(row.Index, -1), true, IsPointerCtrlDown);
+            }
         }
         catch (ArgumentException)
         {
             // Element not in visual tree during container recycling
         }
+    }
+
+    /// <summary>
+    /// The row under a point in host coordinates.
+    /// </summary>
+    /// <remarks>
+    /// The hit test is asked for everything under the point and then walked upwards, rather than
+    /// filtered for a TableViewRow directly: under Uno what comes back is the leaf that was hit, and
+    /// a row is several levels above whatever text block the pointer happened to be over.
+    /// </remarks>
+    internal static TableViewRow? RowFromHitTest(Point screenPoint, ScrollViewer scrollViewer)
+    {
+        foreach (var element in VisualTreeHelper.FindElementsInHostCoordinates(screenPoint, scrollViewer, true))
+        {
+            if (element is TableViewRow row)
+            {
+                return row;
+            }
+
+            if (element is FrameworkElement child && child.FindAscendant<TableViewRow>() is { } above)
+            {
+                return above;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

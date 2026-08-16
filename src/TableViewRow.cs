@@ -188,52 +188,6 @@ public partial class TableViewRow : ListViewItem
         {
             TableView.SelectionStartRowIndex = Index;
         }
-
-        SelectOnPress(e);
-    }
-
-    /// <summary>
-    /// Selects this row on a press, for a row that has no cells to be pressed.
-    ///
-    /// <para>Every pointer-driven selection in this grid runs through
-    /// <see cref="TableViewCell.OnPointerPressed"/> and <see cref="TableViewCell.OnTapped"/> —
-    /// <see cref="TableView.UpdateBaseSelectionMode"/> forces the base ListView's own selection off,
-    /// so nothing else does it. A light row has no cell, and without this it would not select at
-    /// all.</para>
-    ///
-    /// <para>On the press rather than on the tap, which is the one difference from the cell's path.
-    /// A tap is not raised at all once the pointer wanders a few pixels while the button is down —
-    /// the gesture becomes a manipulation — and the cell covers that case from
-    /// <see cref="TableViewCell.OnManipulationDelta"/>, which is also where it drag-selects. A row
-    /// must not take manipulations: this grid can drag its items OUT (CanDragItems), and that
-    /// gesture is the same one.</para>
-    /// </summary>
-    private void SelectOnPress(PointerRoutedEventArgs e)
-    {
-        if (!IsLight || TableView is not { } tableView)
-        {
-            return;
-        }
-
-        // A right press opens a context menu. Moving the selection under it would throw away the
-        // very rows the menu is about to act on (see TableViewCell.OnPointerPressed).
-        if (e.GetCurrentPoint(this).Properties.IsRightButtonPressed)
-        {
-            return;
-        }
-
-        // e.KeyModifiers, never the tracked key state: the latter goes stale when the app is
-        // switched away mid-modifier, turning every later click into a shift-click.
-        var shift = e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Shift);
-        var ctrl = e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Control)
-#if !WINDOWS
-                   || e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Windows)   // macOS: cmd-click
-#endif
-                   ;
-
-        // Column -1: a row, not a cell in it. Same slot the context menu already selects with.
-        tableView.MakeSelection(new TableViewCellSlot(Index, -1), shift, ctrl);
-        tableView.LastSelectionUnit = TableViewSelectionUnit.Row;
     }
 
     /// <inheritdoc/>
