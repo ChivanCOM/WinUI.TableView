@@ -1160,6 +1160,11 @@ public partial class TableView : ListView
     /// one asked for.</summary>
     private const double OverrunFrameMs = TargetFrameMs * 1.5;
 
+    /// <summary>How many screens of backlog the pacer will still try to pace through. Past this the
+    /// gesture has outrun the list by more than pacing can recover, and the queue is taken a screen
+    /// at a time instead — bounded, so no single frame costs more than one re-seed.</summary>
+    private const double BacklogScreens = 2;
+
     /// <summary>What one frame is allowed to travel, in pixels, as it stands. Grows while frames
     /// come back on time and shrinks when they do not; clamped between the floor
     /// (<see cref="MaxScrollRowsPerFrame"/>) and one viewport every time it is used.</summary>
@@ -1211,22 +1216,26 @@ public partial class TableView : ListView
             var pitch = _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1 ?? RowHeight + 1;
             var budget = NextPaceBudget(pitch);
 
-            // Further behind than a screen: take the whole backlog in one step rather than pacing
-            // through it. Past a viewport the panel stops walking row by row and re-seeds, and a
-            // re-seed is one viewport of rows whatever the distance — so a backlog this size is a
-            // fixed price paid once if it is taken at once, and that same price paid every frame if
-            // it is let out a screen at a time. Pacing is for keeping up with a gesture, not for
-            // grinding through one that has already outrun us.
+            // Two ways to take what is queued, and which applies is a question of how far behind the
+            // gesture has left us.
             //
-            // But only once the budget has grown to a screen, which is the case that argument is
-            // about. It says nothing about a budget of three rows, and a fling is a screen or two
-            // ahead by its nature — so on content that cannot deliver a screen a frame this fired on
-            // every drain and the pacer was not pacing anything at all. The stall lines had the
-            // budget converged on seventy-eight pixels and the step taking nine hundred.
-            var canReseedCheaply = budget >= sv.ViewportHeight;
+            // Within a couple of screens, the paced step. That is the mechanism doing its job.
+            //
+            // Past that, a screen at a time — not the whole backlog, and not three rows either. Both
+            // extremes were tried and both are wrong. Taking it all was what the code did, and it
+            // fired on every drain of every fling, so the budget decided nothing: the lines had it
+            // converged on seventy-eight pixels while the step took nine hundred. Pacing through it
+            // instead is worse in a way that is easier to feel than to measure — four thousand
+            // pixels at seventy-eight a frame is the list still travelling three seconds after the
+            // hand has stopped.
+            //
+            // A screen is the honest middle. It is what the panel re-seeds anyway once a step
+            // crosses a viewport, so it is the largest step that costs no more than one re-seed, and
+            // a backlog of any size clears in a handful of them.
+            var screen = Math.Max(budget, sv.ViewportHeight);
 
-            var step = canReseedCheaply && Math.Abs(_pendingScroll) > budget
-                ? _pendingScroll
+            var step = Math.Abs(_pendingScroll) > screen * BacklogScreens
+                ? Math.Sign(_pendingScroll) * screen
                 : Math.Clamp(_pendingScroll, -budget, budget);
             var target = Math.Clamp(sv.VerticalOffset + step, 0, Math.Max(0, sv.ScrollableHeight));
 
