@@ -35,6 +35,28 @@
     </TargetFrameworks>
   </PropertyGroup>
 
+  <!--
+    FOBO fork: this belongs to EVERY configuration, and used to be set for Release only (down in the
+    packing block, where it reads as a NuGet concern). It is not one. It decides the uris this library's
+    own themes are registered under, and without it Uno's XAML generator writes them as
+    ms-appx:///WinUI.TableView/ plus the FULL BUILD PATH of the file:
+
+      registered:  ms-appx:///WinUI.TableView/E:/Projects/WinUI.TableView/src/Themes/TableView.xaml
+      looked up:   ms-appx:///WinUI.TableView/Themes/TableView.xaml
+
+    The second is what Themes/Generic.xaml's own MergedDictionaries ask for, so the two never meet, and
+    the first control to ask for its default style throws "Cannot locate resource from
+    ms-appx:///WinUI.TableView/Themes/TableView.xaml" out of the middle of whatever page was being built.
+    Nothing is broken by it in the end — the dictionary is built again on the next ask — but it is a
+    genuine exception every consumer swallows, and it stops any debugger set to break on throws.
+
+    So Release was always correct and Debug never was, which is exactly the shape that hides a bug: the
+    shipped package resolved its themes and the builds anybody actually develops against did not.
+  -->
+  <PropertyGroup>
+    <GenerateLibraryLayout>true</GenerateLibraryLayout>
+  </PropertyGroup>
+
   <PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier($(TargetFramework))) == 'windows'">
     <UseWinUI>true</UseWinUI>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -76,7 +98,8 @@
     <AllowedOutputExtensionsInPackageBuildOutputFolder>.pdb</AllowedOutputExtensionsInPackageBuildOutputFolder>
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
-    <GenerateLibraryLayout>true</GenerateLibraryLayout>
+    <!-- GenerateLibraryLayout was here. It is unconditional now — see the note above the first
+         PropertyGroup for what it was costing every Debug build. -->
     <Description>TableView/DataGrid control for WinUI.</Description>
     <PackageTags>WinUI, WinAppSDK, Windows, UNO, XAML, TableView, DataGrid</PackageTags>
     <Product>WinUI TableView Control</Product>
