@@ -51,6 +51,12 @@ public sealed class VirtualTreeItemsSource : ITableViewItemsSource, IList
     /// <summary>The underlying model, for host-side structure updates.</summary>
     public VirtualTreeModel Model => _model;
 
+    /// <summary>The rows of one group are in a different order now — see
+    /// <see cref="VirtualTreeModel.ReorderLeaves"/>. Reaches the grid as one Replace per row that
+    /// actually changed slots, and never as a reset.</summary>
+    public void ReorderLeaves(object? group, int offset, IReadOnlyList<object> rows)
+        => _model.ReorderLeaves(group, offset, rows);
+
     /// <summary>Where a row the viewport was showing is now — see
     /// <see cref="VirtualTreeModel.ResolveAnchor"/>. TableView uses this when re-anchoring after a
     /// source re-point, because a rebuilt tree hands back none of the objects it captured.</summary>

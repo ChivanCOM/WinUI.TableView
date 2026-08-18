@@ -235,6 +235,77 @@ public sealed class VirtualTreeModel
     }
 
     /// <summary>
+    /// The rows of one group have been put in a different order, and the store already says so.
+    ///
+    /// <para>Says exactly that and no more: the same rows, the same count, in new slots. No page is
+    /// dropped, nothing is read again and no reset is raised — throwing the whole projection away to
+    /// move one row inside one group costs the reader their place in the list, for a gesture they made
+    /// with the pointer still on the row.</para>
+    ///
+    /// <para><paramref name="rows"/> is the new occupant of each slot from <paramref name="offset"/>
+    /// onwards, within the group's own leaf block. Slots that are not in a resident page are skipped:
+    /// what is not cached is fetched in the store's order the next time it is asked for, which is now
+    /// this order.</para>
+    /// </summary>
+    public void ReorderLeaves(object? group, int offset, IReadOnlyList<object> rows)
+    {
+        if (rows.Count == 0 || offset < 0)
+            return;
+
+        // Written first, indexed second. A row that moves from one slot to another is both a new
+        // occupant and a former one, and deindexing as we go would drop the mapping that had just
+        // been written for it.
+        var moved = new List<((object? Group, int Page) Key, int Slot, object Row, object? Was)>();
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var local = offset + i;
+            var key = (group, local / _pageSize);
+            if (!_pages.TryGetValue(key, out var buffer))
+                continue;
+
+            var inPage = local % _pageSize;
+            if (inPage >= buffer.Length)
+                continue;
+
+            var was = buffer[inPage];
+            if (ReferenceEquals(was, rows[i]))
+                continue;
+
+            buffer[inPage] = rows[i];
+            moved.Add((key, inPage, rows[i], was));
+        }
+
+        if (moved.Count == 0)
+            return;
+
+        foreach (var (key, slot, row, _) in moved)
+        {
+            _leafIndex[row] = (key.Group, key.Page, slot);
+            if (row is INotifyPropertyChanged npc && _subscribedLeaves.Add(npc))
+                npc.PropertyChanged += OnLeafPropertyChanged;
+        }
+
+        // Anything that was in one of these slots and is no longer in any of them has left the cache.
+        var resident = new HashSet<object>(moved.Select(m => m.Row), ReferenceEqualityComparer.Instance);
+        foreach (var (key, _, _, was) in moved)
+        {
+            if (was is not null && !resident.Contains(was))
+                DeindexLeaf(key, was);
+        }
+
+        if (FindLeafSegment(group) is not { } seg)
+            return;
+
+        foreach (var (key, slot, row, was) in moved)
+        {
+            var local = key.Page * _pageSize + slot;
+            if (local < seg.Length)
+                ItemReplaced?.Invoke(seg.Start + local, row, was ?? row);
+        }
+    }
+
+    /// <summary>
     /// One leaf changed which group it belongs to — the row moved, and nothing else did.
     ///
     /// <para>The host has already updated whatever <c>leafCountOf</c> reads (its own group counts)
