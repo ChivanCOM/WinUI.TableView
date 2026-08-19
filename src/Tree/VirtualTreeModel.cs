@@ -903,30 +903,40 @@ public sealed class VirtualTreeModel
                 buffer[i] = rows[i];
 
             _pages[key] = buffer;
-            DropPlaceholderPage(key);
             _pagesInFlight.Remove(key);
             _pageFailures.Remove(key);
             _pageCooldownUntil.Remove(key);
             IndexPage(key, buffer);
             TouchLru(key);
             HookLeaves(buffer);
-            EvictIfNeeded();
+
+            // The placeholders these rows are replacing, while they are still the objects the list
+            // is holding. A replacement names what it replaces, and a name nothing recognizes is not
+            // one: a consumer looks the OLD item up to find the container it is showing in, so a
+            // freshly built placeholder — which is what this used to hand over — left every row
+            // fetched after the first screenful showing the placeholder it was already showing.
+            _placeholderPages.TryGetValue(key, out var vacated);
 
             // Patch only the indices that changed — and only when the block
             // is still visible (the folder may have collapsed mid-fetch; the
             // cache stays warm for the next expand).
             if (FindLeafSegment(group) is { } seg)
             {
-                var placeholder = _placeholderOf(group);
                 for (var i = 0; i < buffer.Length; i++)
                 {
                     if (buffer[i] is not { } row)
                         continue;
                     var flat = seg.Start + offset + i;
                     if (flat < seg.Start + seg.Length)
-                        ItemReplaced?.Invoke(flat, row, placeholder);
+                        ItemReplaced?.Invoke(flat, row, Vacated(vacated, i) ?? _placeholderOf(group));
                 }
             }
+
+            // After the patch, not before it: dropping the page first threw away the identities the
+            // events above are named by, and IndexOf stopped answering for placeholders that were
+            // still on screen.
+            DropPlaceholderPage(key);
+            EvictIfNeeded();
 
             DrainPending();
         }
@@ -947,6 +957,11 @@ public sealed class VirtualTreeModel
             DrainPending();
         }
     }
+
+    /// <summary>The placeholder that stood in a slot, or null when nothing was ever drawn there —
+    /// a page fetched ahead of the viewport is replacing rows nobody has asked for yet.</summary>
+    private static object? Vacated(object?[]? placeholders, int slot)
+        => placeholders is not null && slot < placeholders.Length ? placeholders[slot] : null;
 
     private void HookLeaves(object?[] buffer)
     {

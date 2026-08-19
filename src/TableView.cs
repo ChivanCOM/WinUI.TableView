@@ -157,7 +157,7 @@ public partial class TableView : ListView
     /// </summary>
     private void OnItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        var row = ContainerFromItem(sender) as TableViewRow;
+        var row = RowShowing(sender);
 
         row?.EnsureCellsStyle(default, sender);
 
@@ -166,6 +166,61 @@ public partial class TableView : ListView
         // changed, re-read. An edit, a track finishing its analysis, a cloud state moving — rare,
         // and cheap when it happens.
         row?.RefreshCells(sender);
+    }
+
+    /// <summary>
+    /// The realized row showing <paramref name="item"/>, or null.
+    ///
+    /// <para>Asked of the rows themselves rather than of the framework's item-to-container map. On
+    /// Uno that map is written by the container prepare, and a row filled by
+    /// <c>PatchRealizedRows</c> never had one — the patch is what a landing page does INSTEAD of a
+    /// prepare, and re-pointing the source to get one is the jank it exists to avoid. So the map
+    /// goes on saying that container is showing the placeholder that was there before, and everything
+    /// keyed by the item misses the row: its cells are never re-read, and its selection is never
+    /// painted. Both of those were live bugs — a renumbered record whose numbers did not appear, and
+    /// a page of rows arriving unwashed under a selection nobody had changed.</para>
+    ///
+    /// <para>A scan of the realized rows, which is a viewport of them, and it is only reached on the
+    /// rare paths: an item saying one of its values changed. The framework map is still asked
+    /// second, for the rows this grid does not track.</para>
+    /// </summary>
+    public TableViewRow? RowShowing(object? item)
+    {
+        if (item is null)
+        {
+            return null;
+        }
+
+        foreach (var row in _rows)
+        {
+            if (ReferenceEquals(row.Content, item))
+            {
+                return row;
+            }
+        }
+
+        return ContainerFromItem(item) as TableViewRow;
+    }
+
+    /// <summary>
+    /// Paints every realized row's selection from <paramref name="selected"/>, which is asked about
+    /// the item the row is showing.
+    ///
+    /// <para>For a host whose selection is a fact about the DATA — a tick in a store, a flag on the
+    /// row — rather than a set of objects the list is holding. One pass over the viewport, and it
+    /// does not go through the item-to-container map, which is what makes it work for rows a landing
+    /// page filled in place (see <see cref="RowShowing"/>).</para>
+    /// </summary>
+    public void PaintRowSelection(Func<object?, bool> selected)
+    {
+        foreach (var row in _rows)
+        {
+            var wanted = selected(row.Content);
+            if (row.IsSelected != wanted)
+            {
+                row.IsSelected = wanted;
+            }
+        }
     }
 
     /// <summary>
@@ -621,6 +676,11 @@ public partial class TableView : ListView
                 }
 
                 DiagPostPrepareTicks += System.Diagnostics.Stopwatch.GetTimestamp() - postT0;
+
+                // Last, and on this turn of the dispatcher rather than inside the prepare itself: a
+                // handler may well touch the selection, and the selection is the one thing a list is
+                // not willing to have changed underneath its own container pass.
+                OnRowRealized(new TableViewRowRealizedEventArgs(row, item));
             }
         });
     }
@@ -2257,6 +2317,16 @@ public partial class TableView : ListView
 
             row.DataContext = item;
             row.Content = item;
+
+            // The row is showing a DIFFERENT item now, and it got here without a container prepare —
+            // that is the whole point of patching in place. Everything the list keys by the item
+            // rather than by the container therefore still belongs to the row that was here before,
+            // which for a landing page is a placeholder: content correct, selection not. A page of
+            // rows arriving unwashed under a selection nobody changed is exactly that.
+            //
+            // Said rather than repaired, because what a row's state OUGHT to be is the host's
+            // question and it is often not "whatever the list last recorded".
+            OnRowRealized(new TableViewRowRealizedEventArgs(row, item));
         }
     }
 #endif

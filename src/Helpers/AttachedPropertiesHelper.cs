@@ -5,7 +5,10 @@ namespace WinUI.TableView.Helpers;
 /// <summary>
 /// Provides attached properties for various purposes.
 /// </summary>
-internal class AttachedPropertiesHelper
+// Bindable: a XAML binding onto one of these properties otherwise falls back to reflection, which
+// the runtime warns about on every resolve.
+[Microsoft.UI.Xaml.Data.Bindable]
+internal partial class AttachedPropertiesHelper
 {
     /// <summary>
     /// Gets the FrozenColumnScrollBarSpace attached property. This is used to reserve space for the scrollbar in frozen columns.

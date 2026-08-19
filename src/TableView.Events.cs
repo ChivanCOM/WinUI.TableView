@@ -121,6 +121,21 @@ partial class TableView
     }
 
     /// <summary>
+    /// Event triggered when a row has been prepared for an item — on first realize and on every
+    /// recycle. See <see cref="TableViewRowRealizedEventArgs"/> for what belongs here.
+    /// </summary>
+    public event EventHandler<TableViewRowRealizedEventArgs>? RowRealized;
+
+    /// <summary>
+    /// Called before the <see cref="RowRealized"/> event occurs.
+    /// </summary>
+    /// <param name="args">The event data.</param>
+    protected internal virtual void OnRowRealized(TableViewRowRealizedEventArgs args)
+    {
+        RowRealized?.Invoke(this, args);
+    }
+
+    /// <summary>
     /// Event triggered when a cell is double-tapped.
     /// </summary>
     public event EventHandler<TableViewCellDoubleTappedEventArgs>? CellDoubleTapped;
