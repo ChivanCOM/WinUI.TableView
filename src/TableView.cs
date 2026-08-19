@@ -157,69 +157,37 @@ public partial class TableView : ListView
     /// </summary>
     private void OnItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        var row = RowShowing(sender);
-
-        row?.EnsureCellsStyle(default, sender);
-
-        // Text columns write their value instead of binding it (see TableViewTextColumn), which
-        // trades a binding expression per cell per scrolled row for this: the one row that actually
-        // changed, re-read. An edit, a track finishing its analysis, a cloud state moving — rare,
-        // and cheap when it happens.
-        row?.RefreshCells(sender);
-    }
-
-    /// <summary>
-    /// The realized row showing <paramref name="item"/>, or null.
-    ///
-    /// <para>Asked of the rows themselves rather than of the framework's item-to-container map. On
-    /// Uno that map is written by the container prepare, and a row filled by
-    /// <c>PatchRealizedRows</c> never had one — the patch is what a landing page does INSTEAD of a
-    /// prepare, and re-pointing the source to get one is the jank it exists to avoid. So the map
-    /// goes on saying that container is showing the placeholder that was there before, and everything
-    /// keyed by the item misses the row: its cells are never re-read, and its selection is never
-    /// painted. Both of those were live bugs — a renumbered record whose numbers did not appear, and
-    /// a page of rows arriving unwashed under a selection nobody had changed.</para>
-    ///
-    /// <para>A scan of the realized rows, which is a viewport of them, and it is only reached on the
-    /// rare paths: an item saying one of its values changed. The framework map is still asked
-    /// second, for the rows this grid does not track.</para>
-    /// </summary>
-    public TableViewRow? RowShowing(object? item)
-    {
-        if (item is null)
+        if (sender is null)
         {
-            return null;
+            return;
         }
 
-        foreach (var row in _rows)
+        // EVERY row showing it, not the first one found. Text columns write their value instead of
+        // binding it (see TableViewTextColumn), which trades a binding expression per cell per
+        // scrolled row for this: the rows that actually changed, re-read. An edit, a track finishing
+        // its analysis, a cloud state moving — rare, and cheap when it happens.
+        //
+        // Asked of the rows on screen rather than of the prepare log or the framework's map, because
+        // a container can be showing this item without appearing in either (see RowsOnScreen). That
+        // was the mass edit whose new values landed on some rows and not others.
+        var found = false;
+        foreach (var row in RowsShowing(sender))
         {
-            if (ReferenceEquals(row.Content, item))
-            {
-                return row;
-            }
+            found = true;
+            row.EnsureCellsStyle(default, sender);
+            row.RefreshCells(sender);
         }
 
-        return ContainerFromItem(item) as TableViewRow;
-    }
-
-    /// <summary>
-    /// Paints every realized row's selection from <paramref name="selected"/>, which is asked about
-    /// the item the row is showing.
-    ///
-    /// <para>For a host whose selection is a fact about the DATA — a tick in a store, a flag on the
-    /// row — rather than a set of objects the list is holding. One pass over the viewport, and it
-    /// does not go through the item-to-container map, which is what makes it work for rows a landing
-    /// page filled in place (see <see cref="RowShowing"/>).</para>
-    /// </summary>
-    public void PaintRowSelection(Func<object?, bool> selected)
-    {
-        foreach (var row in _rows)
+        if (found)
         {
-            var wanted = selected(row.Content);
-            if (row.IsSelected != wanted)
-            {
-                row.IsSelected = wanted;
-            }
+            return;
+        }
+
+        // Last: the rows this grid does not track.
+        if (ContainerFromItem(sender) is TableViewRow mapped)
+        {
+            mapped.EnsureCellsStyle(default, sender);
+            mapped.RefreshCells(sender);
         }
     }
 
