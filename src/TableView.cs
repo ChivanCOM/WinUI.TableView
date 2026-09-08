@@ -2111,42 +2111,6 @@ public partial class TableView : ListView
         }
     }
 
-    /// <summary>
-    /// What one row occupies, for turning a row index into a scroll offset.
-    ///
-    /// <para>From the panel's OWN extent first, because that is what the offset is being aimed at:
-    /// a caller wants to land where the panel will put the row, and the panel places rows against
-    /// the extent it is publishing, not against any row's measurement. Sampling one container
-    /// instead is off by whatever that container includes and the placement does not — a 22px grid
-    /// laid out at 23px per row samples a row at 23, adds the customary border, and aims at 24,
-    /// which is a row of drift for every row above the target (measured: 12,000px, ~520 rows, on a
-    /// restore twelve thousand rows down).</para>
-    ///
-    /// <para>The measured row and then <see cref="RowHeight"/> are the fallbacks, for before there
-    /// is an extent to read, and for while the extent is still an underestimate — a panel part-way
-    /// through its first fill publishes an extent worth a few screens, and dividing that by the
-    /// whole count gives a pitch shorter than a row, which would aim every offset near the top. A
-    /// pitch below the grid's own row height is the tell.</para>
-    ///
-    /// <para>A grid with mixed row heights gets an average out of this and should provide
-    /// <see cref="RowOffsetOfIndex"/>, which is exact.</para>
-    /// </summary>
-    private double EstimatedRowPitch()
-    {
-        var count = Items?.Count ?? 0;
-        if (count > 0 && _scrollViewer is { ExtentHeight: > 0 } sv)
-        {
-            var fromExtent = sv.ExtentHeight / count;
-            if (double.IsNaN(RowHeight) || fromExtent >= RowHeight)
-            {
-                return fromExtent;
-            }
-        }
-
-        return _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1
-               ?? (double.IsNaN(RowHeight) ? 41 : RowHeight + 1);
-    }
-
     /// <summary>Set between asking for a restore and the restore running, so the several signals
     /// that all mean "the rebuild moved on" queue one attempt between them and not one each.</summary>
     private bool _unoRestoreQueued;
@@ -2298,6 +2262,45 @@ public partial class TableView : ListView
         }
     }
 #endif
+
+    // Outside the block above on purpose: IsFarFromViewport and JumpToRow call this and neither is
+    // conditional, so with it inside, the Windows build had two calls to a method that was not
+    // compiled. Nothing in it is Uno-specific.
+    /// <summary>
+    /// What one row occupies, for turning a row index into a scroll offset.
+    ///
+    /// <para>From the panel's OWN extent first, because that is what the offset is being aimed at:
+    /// a caller wants to land where the panel will put the row, and the panel places rows against
+    /// the extent it is publishing, not against any row's measurement. Sampling one container
+    /// instead is off by whatever that container includes and the placement does not — a 22px grid
+    /// laid out at 23px per row samples a row at 23, adds the customary border, and aims at 24,
+    /// which is a row of drift for every row above the target (measured: 12,000px, ~520 rows, on a
+    /// restore twelve thousand rows down).</para>
+    ///
+    /// <para>The measured row and then <see cref="RowHeight"/> are the fallbacks, for before there
+    /// is an extent to read, and for while the extent is still an underestimate — a panel part-way
+    /// through its first fill publishes an extent worth a few screens, and dividing that by the
+    /// whole count gives a pitch shorter than a row, which would aim every offset near the top. A
+    /// pitch below the grid's own row height is the tell.</para>
+    ///
+    /// <para>A grid with mixed row heights gets an average out of this and should provide
+    /// <see cref="RowOffsetOfIndex"/>, which is exact.</para>
+    /// </summary>
+    private double EstimatedRowPitch()
+    {
+        var count = Items?.Count ?? 0;
+        if (count > 0 && _scrollViewer is { ExtentHeight: > 0 } sv)
+        {
+            var fromExtent = sv.ExtentHeight / count;
+            if (double.IsNaN(RowHeight) || fromExtent >= RowHeight)
+            {
+                return fromExtent;
+            }
+        }
+
+        return _rows.FirstOrDefault(r => r.ActualHeight > 0)?.ActualHeight + 1
+               ?? (double.IsNaN(RowHeight) ? 41 : RowHeight + 1);
+    }
 
     /// <summary>
     /// FOBO fork: swap the active items-source. Detaches event handlers
