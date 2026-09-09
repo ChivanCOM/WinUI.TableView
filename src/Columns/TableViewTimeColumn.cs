@@ -119,7 +119,7 @@ public partial class TableViewTimeColumn : TableViewBoundColumn
 
             if (!string.IsNullOrEmpty(PropertyPath))
             {
-                var propertyInfo = type.GetProperty(PropertyPath);
+                var propertyInfo = type.ForBinding().GetProperty(PropertyPath);
                 if (propertyInfo is not null)
                 {
                     type = propertyInfo.PropertyType;

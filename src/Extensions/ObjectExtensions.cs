@@ -120,7 +120,7 @@ internal static partial class ObjectExtensions
 
     private static MemberExpression BuildPropertyGetterExpression(Expression current, string propertyName)
     {
-        var propertyInfo = current.Type.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+        var propertyInfo = current.Type.ForBinding().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
             ?? throw new ArgumentException($"Property '{propertyName}' not found on type '{current.Type.Name}'.");
 
         return Expression.Property(current, propertyInfo);
@@ -142,7 +142,7 @@ internal static partial class ObjectExtensions
 
     private static Expression BuildPropertySetterExpression(Expression current, string propertyName, Expression value)
     {
-        var propertyInfo = current.Type.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+        var propertyInfo = current.Type.ForBinding().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
         ?? throw new ArgumentException($"Property '{propertyName}' not found on type '{current.Type.Name}'.");
 
         if (!propertyInfo.CanWrite)
@@ -216,7 +216,7 @@ internal static partial class ObjectExtensions
     {
         if (indices.Length == 1)
         {
-            var dictionaryInterface = current.Type.GetInterfaces()
+            var dictionaryInterface = current.Type.ForBinding().GetInterfaces()
                 .FirstOrDefault(i => i.IsGenericType &&
                                      i.GetGenericTypeDefinition() == typeof(IDictionary<,>));
 
@@ -229,7 +229,7 @@ internal static partial class ObjectExtensions
                 if (!keyType.IsAssignableFrom(indices[0].GetType()))
                     return Expression.Empty();
 
-                var indexer = dictionaryInterface.GetProperty("Item")!;
+                var indexer = dictionaryInterface.ForBinding().GetProperty("Item")!;
 
                 var target = Expression.Property(Expression.Convert(current, dictionaryInterface),
                     indexer,
@@ -241,7 +241,7 @@ internal static partial class ObjectExtensions
 
         var indexerTypes = indices.Select(index => index.GetType()).ToArray();
 
-        var indexerProperty = current.Type.GetProperty("Item", indexerTypes)
+        var indexerProperty = current.Type.ForBinding().GetProperty("Item", indexerTypes)
             ?? throw new ArgumentException($"Indexer not found on type '{current.Type.Name}'.");
 
         if (!indexerProperty.CanWrite)
@@ -254,7 +254,7 @@ internal static partial class ObjectExtensions
         // Add bounds checking for IList/ICollection types with integer indexers
         if (indices.Length == 1 && indices[0] is int intIndex)
         {
-            var listInterface = current.Type.GetInterfaces()
+            var listInterface = current.Type.ForBinding().GetInterfaces()
                 .FirstOrDefault(i => i.IsGenericType &&
                                 (i.GetGenericTypeDefinition() == typeof(IList<>) ||
                                  i.GetGenericTypeDefinition() == typeof(ICollection<>)));
@@ -267,9 +267,9 @@ internal static partial class ObjectExtensions
                 // and reflection does not surface inherited interface members, so search interfaces too.
                 // The container type is no longer specialized to the concrete runtime type during navigation,
                 // so current.Type can legitimately be an interface like IList here.
-                var countProperty = current.Type.GetProperty("Count")
-                    ?? current.Type.GetInterfaces()
-                        .Select(i => i.GetProperty("Count"))
+                var countProperty = current.Type.ForBinding().GetProperty("Count")
+                    ?? current.Type.ForBinding().GetInterfaces()
+                        .Select(i => i.ForBinding().GetProperty("Count"))
                         .FirstOrDefault(p => p is not null);
 
                 if (countProperty != null)
@@ -540,7 +540,7 @@ internal static partial class ObjectExtensions
         // but we cast only to the root type that actually declares the first path segment.
         // This keeps the accessor compatible with sibling subclasses in mixed collections.
         {
-            var t = dataItem.GetType();
+            var t = dataItem.GetType().ForBinding();
             // Resolve the declaring type for the first segment (property or indexer).
             // If we cannot resolve it, keep the original runtime type as fallback.
             var typeRoot = matches.Count > 0 ? GetDeclaringTypeForPathSegment(t, matches[0].Value) ?? t : t;
@@ -595,7 +595,7 @@ internal static partial class ObjectExtensions
                 // The partial result gives us the runtime container for the NEXT segment.
                 // Convert to the most general declaring type for that next segment (property/indexer)
                 // instead of converting directly to the concrete runtime subtype.
-                var typeResult = result?.GetType();
+                var typeResult = result?.GetType().ForBinding();
                 if (typeResult != null)
                 {
                     var nextPart = matches[matchIndex + 1].Value;
@@ -626,7 +626,9 @@ internal static partial class ObjectExtensions
     /// <param name="candidateType">The type on which the segment should be resolved.</param>
     /// <param name="segment">One binding path segment, either a property name or an indexer token like "[0]".</param>
     /// <returns>The segment declaring type when resolved; otherwise <see langword="null"/>.</returns>
-    private static Type? GetDeclaringTypeForPathSegment(Type candidateType, string segment)
+    private static Type? GetDeclaringTypeForPathSegment(
+        [DynamicallyAccessedMembers(BindableTypeExtensions.BindableMembers)] Type candidateType,
+        string segment)
     {
         if (string.IsNullOrWhiteSpace(segment))
             return null;
@@ -738,7 +740,9 @@ internal static partial class ObjectExtensions
     /// </summary>
     private static Expression AddIndexerAccessWithSafetyChecks(Expression current, object[] indices)
     {
-        var currentType = current.Type;
+        // One crossing for the three calls below: currentType is an expression's own Type, which is
+        // where the trimmer's sight ends. See BindableTypeExtensions.
+        var currentType = current.Type.ForBinding();
         var parameter = Expression.Parameter(currentType, "collection");
         var assignCurrent = Expression.Assign(parameter, current);
 
@@ -767,7 +771,11 @@ internal static partial class ObjectExtensions
     /// <summary>
     /// Creates a TryGetValue expression for IDictionary types.
     /// </summary>
-    private static bool TryCreateDictionaryTryGetExpression(Type type, ParameterExpression parameter, object[] indices, out Expression expression)
+    private static bool TryCreateDictionaryTryGetExpression(
+        [DynamicallyAccessedMembers(BindableTypeExtensions.BindableMembers)] Type type,
+        ParameterExpression parameter,
+        object[] indices,
+        out Expression expression)
     {
         expression = null!;
 
@@ -794,7 +802,7 @@ internal static partial class ObjectExtensions
         }
 
         // Get TryGetValue method
-        var tryGetValueMethod = dictionaryInterface.GetMethod("TryGetValue");
+        var tryGetValueMethod = dictionaryInterface.ForBinding().GetMethod("TryGetValue");
         if (tryGetValueMethod == null)
             throw new InvalidOperationException($"The dictionary type {type} has no TryGetValue method");    // should not happen
 
@@ -821,7 +829,11 @@ internal static partial class ObjectExtensions
     /// <summary>
     /// Creates a bounds-checked expression for IList and ICollection types.
     /// </summary>
-    private static bool TryCreateIListOrICollectionBoundsCheckExpression(Type type, ParameterExpression parameter, object[] indices, out Expression expression)
+    private static bool TryCreateIListOrICollectionBoundsCheckExpression(
+        [DynamicallyAccessedMembers(BindableTypeExtensions.BindableMembers)] Type type,
+        ParameterExpression parameter,
+        object[] indices,
+        out Expression expression)
     {
         expression = null!;
 
@@ -873,7 +885,11 @@ internal static partial class ObjectExtensions
     /// Creates an expression for generic indexers, with try-catch to handle potential exceptions.
     /// Returns null if indexer access fails for any reason.
     /// </summary>
-    private static bool TryCreateGenericIndexerExpression(Type type, ParameterExpression parameter, object[] indices, out Expression expression)
+    private static bool TryCreateGenericIndexerExpression(
+        [DynamicallyAccessedMembers(BindableTypeExtensions.BindableMembers)] Type type,
+        ParameterExpression parameter,
+        object[] indices,
+        out Expression expression)
     {
         expression = null!;
 

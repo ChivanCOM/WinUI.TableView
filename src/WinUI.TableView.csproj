@@ -13,12 +13,13 @@
         states (DragItemThemeAnimation / DragOverThemeAnimation /
         DropTargetItemThemeAnimation / VisualTransition.GeneratedDuration) are
         not implemented in Uno. Pure Windows-WinUI polish; safe no-op under Uno.
-      IL2070/IL2075: the lib binds data by property-name reflection
-        (ObjectExtensions, TypeExtensions, TableView core, Date/Time columns).
-        Inherent to a runtime binding library; properly annotating every
-        reflection callsite with DynamicallyAccessedMembers would diverge
-        heavily from upstream w-ahmad/WinUI.TableView. The consuming app
-        (DataMaker desktop) doesn't trim, so these are noise.
+      IL2070/IL2075 were suppressed here, on the grounds that the consuming app
+        did not trim so they were noise. RPM trims, so they are not noise, and a
+        suppressed trimming warning does not stop the property being trimmed. It
+        stops anyone hearing about it. They are on, and the binder carries
+        real annotations that lead to Extensions/BindableTypeExtensions.cs: the
+        single place this library admits the trimmer cannot follow a binding
+        path, and whose header says what a consuming app must do to be AOT-safe.
       CS1591: missing XML doc on public members. The Release block below turns
         on GenerateDocumentationFile (for NuGet packing), which flags every
         FOBO-added member on SqlBackedItemsSource. DataMaker consumes this as a
@@ -26,7 +27,7 @@
         fork's additions are intentionally undocumented vs upstream. Without
         this, any Release publish of the consuming app fails.
     -->
-    <NoWarn>$(NoWarn);Uno0001;IL2070;IL2075;CS1591</NoWarn>
+    <NoWarn>$(NoWarn);Uno0001;CS1591</NoWarn>
     <TargetFrameworks Condition="'$(OS)' == 'Windows_NT'">
       net8.0-windows10.0.19041.0;
       net9.0-windows10.0.19041.0;

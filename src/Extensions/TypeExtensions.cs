@@ -127,13 +127,19 @@ internal static class TypeExtensions
         return typeof(IComparable).IsAssignableFrom(type);
     }
 
+    /// <remarks>
+    /// FOBO fork: the crossing is inside rather than on the parameter. Every value this walks over is
+    /// unannotated by construction — the parameter arrives as a runtime type, the loop reassigns it
+    /// from BaseType, and the recursion passes an element of ImplementedInterfaces. Annotating the
+    /// parameter would only move the same admission onto callers that cannot satisfy it either.
+    /// </remarks>
     private static Type? FindGenericType(Type definition, Type type)
     {
         var definitionTypeInfo = definition.GetTypeInfo();
 
         while (type != null && type != typeof(object))
         {
-            var typeTypeInfo = type.GetTypeInfo();
+            var typeTypeInfo = type.ForBinding().GetTypeInfo();
 
             if (typeTypeInfo.IsGenericType && type.GetGenericTypeDefinition() == definition)
             {

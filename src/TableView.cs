@@ -1642,7 +1642,7 @@ public partial class TableView : ListView
         }
         else
         {
-            foreach (var propertyInfo in dataType.GetProperties())
+            foreach (var propertyInfo in dataType.ForBinding().GetProperties())
             {
                 var displayAttribute = propertyInfo.GetCustomAttributes().OfType<DisplayAttribute>().FirstOrDefault();
                 var autoGenerateField = displayAttribute?.GetAutoGenerateField();
