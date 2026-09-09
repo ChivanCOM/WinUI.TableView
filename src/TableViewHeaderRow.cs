@@ -127,11 +127,26 @@ public partial class TableViewHeaderRow : Control
             var xClip = (headersOffset * -1) + frozenOffset;
 
             _scrollableHeadersPanel.Arrange(new Rect(headersOffset, 0, _scrollableHeadersPanel.ActualWidth, _scrollableHeadersPanel.ActualHeight));
-            _scrollableHeadersPanel.Clip = headersOffset >= frozenOffset ? null :
-                new RectangleGeometry
-                {
-                    Rect = new Rect(xClip, 0, _scrollableHeadersPanel.ActualWidth - xClip, finalSize.Height)
-                };
+
+            // FOBO fork: both edges, and on every pass rather than only while scrolled.
+            //
+            // The arrange above hands the strip its FULL content width — every column, not the ones on
+            // screen — which is what lets it be slid left by the horizontal offset. Arranging a child
+            // at its own desired size also means the layout system has nothing to trim, so the clip the
+            // parent grid's cell would have given it is gone and nothing else bounds the right-hand
+            // end: the headers ran on past the grid's own edge and over whatever sat beside it. Only
+            // the WinUI head showed it, which is why it stood for as long as it did.
+            //
+            // The strip's window is the room to the right of the frozen headers, and that is the same
+            // window whether or not the grid is scrolled — the offset moves what is IN it, not where it
+            // is. xClip is the panel-local x of that window's left edge and works out to the horizontal
+            // offset itself; the width is what is left of this row after the frozen headers.
+            var visibleWidth = Math.Max(0d, finalSize.Width - frozenOffset);
+
+            _scrollableHeadersPanel.Clip = new RectangleGeometry
+            {
+                Rect = new Rect(xClip, 0, visibleWidth, finalSize.Height)
+            };
         }
 
         return finalSize;
