@@ -885,31 +885,41 @@ public partial class TableViewRow : ListViewItem
     /// <summary>
     /// Ensures the position of the selection indicator.
     /// </summary>
-    private async void EnsureSelectionIndicatorPosition(double detailsHeight, Border? selectionIndicator)
+    /// <remarks>
+    /// FOBO fork: this was an <c>async void</c> that began a Storyboard and then dropped it. Both
+    /// halves of that are unsafe on the WinUI head, and the WinUI head is the only place this runs —
+    /// <see cref="EnsureLayout"/> calls it from inside its own <c>#if WINDOWS</c> block.
+    ///
+    /// <para>The Storyboard's duration was zero, so it was an assignment written as an animation. A
+    /// Storyboard that is begun and not held is collectable while its native peer is still running:
+    /// Uno roots its own, WinUI does not. And one was built per row, per selection change — the
+    /// registered <c>IsSelected</c> callback calls EnsureLayout, which calls this — so a grid
+    /// painting a selection across its viewport made one for every visible row. Writing Y directly is
+    /// the same result with nothing left running behind it.</para>
+    ///
+    /// <para>The <c>async void</c> went with it: a throw out of one reaches
+    /// Application.UnhandledException, and a host that does not mark that handled loses the process.
+    /// The deferral is kept, because the value read below is settled by a visual state change that is
+    /// still in flight when this is called.</para>
+    /// </remarks>
+    private void EnsureSelectionIndicatorPosition(double detailsHeight, Border? selectionIndicator)
     {
-        await Task.Yield(); // let the animations and visual state changes complete
-
-        if (selectionIndicator is not null)
+        if (selectionIndicator is null)
         {
-            // Assign a TranslateTransform for animation
-            var translateTransform = new TranslateTransform();
-            selectionIndicator.RenderTransform = translateTransform;
-
-            var toValue = RowPresenter?.IsDetailsPanelVisible ?? false ? Math.Round(-detailsHeight / 2) : 0; // move up or down
-
-            var animation = new DoubleAnimation
-            {
-                To = toValue,
-                Duration = new Duration(TimeSpan.Zero)
-            };
-
-            var storyboard = new Storyboard();
-            Storyboard.SetTarget(animation, translateTransform);
-            Storyboard.SetTargetProperty(animation, "Y"); // vertical movement
-            storyboard.Children.Add(animation);
-
-            storyboard.Begin();
+            return;
         }
+
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            // Reused rather than replaced: a new transform per selection change is another native
+            // object per row for a value that is nearly always the one already there.
+            if (selectionIndicator.RenderTransform is not TranslateTransform transform)
+            {
+                selectionIndicator.RenderTransform = transform = new TranslateTransform();
+            }
+
+            transform.Y = RowPresenter?.IsDetailsPanelVisible ?? false ? Math.Round(-detailsHeight / 2) : 0;
+        });
     }
 
     /// <summary>
