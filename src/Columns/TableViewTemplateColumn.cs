@@ -30,15 +30,57 @@ public partial class TableViewTemplateColumn : TableViewColumn
     /// <returns>A ContentControl element.</returns>
     public override FrameworkElement GenerateElement(TableViewCell cell, object? dataItem)
     {
-        return new ContentControl
+        var element = new ContentControl
         {
-            // Content drives the DataContext inside the template; without it {Binding} in the CellTemplate
-            // resolves against null and every template binding silently yields nothing.
-            Content = dataItem,
             VerticalContentAlignment = VerticalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             ContentTemplate = CellTemplateSelector?.SelectTemplate(dataItem) ?? CellTemplate
         };
+
+        // Content drives the DataContext inside the template; without it {Binding} in the CellTemplate
+        // resolves against null and every template binding silently yields nothing. DataContext is set
+        // and not inherited: see TemplateItem. The row's own DataContext is the item, placeholder
+        // included, and the template would read it through this element if this element had none.
+        ShowItem(element, dataItem);
+        return element;
+    }
+
+    /// <summary>
+    /// What the cell's template binds against: the item, or null where the source handed out a
+    /// placeholder for a page that has not arrived.
+    ///
+    /// <para>A placeholder is not a row. It has none of the host's properties, so every path binding
+    /// in the template fails to resolve against it and WinUI logs a binding error for each one — per
+    /// bound element, per cell, per row realized, written with OutputDebugString. A scroll through a
+    /// SQL-backed grid produced three lines a row this way. Against a null data context the same
+    /// bindings are silent and leave their targets at the defaults, which is what a placeholder cell
+    /// is meant to show; the real item arrives through <see cref="RefreshElement"/> when the page
+    /// lands.</para>
+    /// </summary>
+    private static object? TemplateItem(object? dataItem)
+        => dataItem is ITableViewPlaceholderItem ? null : dataItem;
+
+    /// <summary>
+    /// Points a cell's element at its item, and HIDES the element when there is no item.
+    ///
+    /// <para>Hiding it is the half that was missing. A placeholder binds against null, and a binding
+    /// against null is silent — but silent does not mean it clears its target: the target keeps what it
+    /// had, which on a fresh element is the property's default and on a recycled one is the previous
+    /// row's value. <see cref="UIElement.Visibility"/> defaults to Visible, so a template whose parts
+    /// are SHOWN by a binding drew them on placeholder rows that had nothing behind them at all: a
+    /// now-playing animation on a row that was not playing, a drag handle on a row that was not a file.
+    /// Both were reported from the app before this was found.</para>
+    ///
+    /// <para>Collapsing the element says the one thing a placeholder cell means — there is nothing here
+    /// yet — and says it without depending on any binding in the template. It costs one property write
+    /// per cell, and the real item turns it back on when the page lands.</para>
+    /// </summary>
+    private static void ShowItem(ContentControl element, object? dataItem)
+    {
+        var item = TemplateItem(dataItem);
+
+        element.Content = element.DataContext = item;
+        element.Visibility = item is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>
@@ -52,13 +94,15 @@ public partial class TableViewTemplateColumn : TableViewColumn
     {
         if (EditingTemplate is not null || EditingTemplateSelector is not null)
         {
-            return new ContentControl
+            var element = new ContentControl
             {
-                Content = dataItem, // DataContext for the editing template (see GenerateElement)
                 VerticalContentAlignment = VerticalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 ContentTemplate = EditingTemplateSelector?.SelectTemplate(dataItem) ?? EditingTemplate
             };
+
+            ShowItem(element, dataItem);   // the editing template's data context (see GenerateElement)
+            return element;
         }
 
         return GenerateElement(cell, dataItem);
@@ -81,7 +125,7 @@ public partial class TableViewTemplateColumn : TableViewColumn
 
         if (cell.Content is ContentControl existing && Equals(existing.ContentTemplate, template))
         {
-            existing.Content = dataItem;
+            ShowItem(existing, dataItem);
             return;
         }
 
@@ -98,15 +142,20 @@ public partial class TableViewTemplateColumn : TableViewColumn
     public override bool CanRenderWithoutCell => ConditionalCellStyles.Count == 0 && GetCellToolTip is null;
 
     /// <inheritdoc/>
-    public override FrameworkElement CreateCellFreeElement(object? dataItem) => new ContentControl
+    public override FrameworkElement CreateCellFreeElement(object? dataItem)
     {
-        // Content drives the DataContext inside the template; without it {Binding} in the
-        // CellTemplate resolves against null and every template binding silently yields nothing.
-        Content = dataItem,
-        VerticalContentAlignment = VerticalAlignment.Stretch,
-        HorizontalContentAlignment = HorizontalAlignment.Stretch,
-        ContentTemplate = CellTemplateSelector?.SelectTemplate(dataItem) ?? CellTemplate
-    };
+        var element = new ContentControl
+        {
+            VerticalContentAlignment = VerticalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            ContentTemplate = CellTemplateSelector?.SelectTemplate(dataItem) ?? CellTemplate
+        };
+
+        // On the light path this element hangs off the row directly, and the row's DataContext is the
+        // item, placeholder included — so this element carries its own (see GenerateElement).
+        ShowItem(element, dataItem);
+        return element;
+    }
 
     /// <inheritdoc/>
     /// <remarks>
@@ -129,7 +178,7 @@ public partial class TableViewTemplateColumn : TableViewColumn
             content.ContentTemplate = template;
         }
 
-        content.Content = dataItem;
+        ShowItem(content, dataItem);
     }
 
     /// <summary>

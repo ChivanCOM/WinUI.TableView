@@ -1,4 +1,4 @@
-// FOBO fork addition.
+﻿// FOBO fork addition.
 //
 // A row's cells, without the cells.
 //
@@ -577,6 +577,9 @@ internal sealed partial class TableViewLightCellsPanel : Panel
             new TableViewCellSlot(_row.Index, -1), tableView.IsPointerShiftDown, tableView.IsPointerCtrlDown);
     }
 
+    /// <summary>Which row the sweep is over. See <see cref="RowHitCache"/>.</summary>
+    private readonly RowHitCache _rowHits = new();
+
     private void OnManipulationDelta(object sender, ManipulationDeltaRoutedEventArgs e)
     {
         if (_row?.TableView is not { } tableView)
@@ -610,7 +613,7 @@ internal sealed partial class TableViewLightCellsPanel : Panel
         // When the pointer is outside the viewport this finds nothing, and the selection is carried
         // on instead by the auto-scroll tick (TableView.SelectCellAtDragPoint, which answers for a
         // light row too).
-        if (FindRow(e.Position) is { } row && row.Index != tableView.CurrentRowIndex)
+        if (_rowHits.Find(this, tableView, e.Position) is { } row && row.Index != tableView.CurrentRowIndex)
         {
             tableView.MakeSelection(new TableViewCellSlot(row.Index, -1), true, tableView.IsPointerCtrlDown);
         }
@@ -637,7 +640,7 @@ internal sealed partial class TableViewLightCellsPanel : Panel
         _row?.TableView?.EndDragSelection();
         ReleasePointerCaptures();
         _dragOrigin = null;
-        _lastHitRow = null;
+        _rowHits.Forget();
     }
 
     /// <summary>True once the pointer has moved far enough from where it went down to mean a sweep.</summary>
@@ -668,56 +671,6 @@ internal sealed partial class TableViewLightCellsPanel : Panel
         catch (ArgumentException)
         {
             return null;   // not in the visual tree, mid-recycle
-        }
-    }
-
-    // A sweep hit-tests on every manipulation delta, and a full walk of the ScrollViewer's subtree
-    // per pointer move is the hot cost of dragging across a big viewport. Consecutive moves almost
-    // always stay inside the same row, so the last hit and its bounds are remembered and only
-    // re-tested once the pointer leaves them — invalidated when the view scrolls (the offsets are
-    // part of the cache) or the gesture ends (containers recycle between gestures).
-    private TableViewRow? _lastHitRow;
-    private Rect _lastHitBounds;
-    private double _lastHitVerticalOffset;
-    private double _lastHitHorizontalOffset;
-
-    /// <summary>The row under a point given in this panel's coordinates.</summary>
-    private TableViewRow? FindRow(Point position)
-    {
-        if (_row?.TableView is not { } tableView || tableView.FindDescendant<ScrollViewer>() is not { } scrollViewer)
-        {
-            return null;
-        }
-
-        try
-        {
-            var point = TransformToVisual(null).TransformPoint(position);
-
-            if (_lastHitRow is { IsLoaded: true } cached
-                && ReferenceEquals(cached.TableView, tableView)
-                && _lastHitVerticalOffset == scrollViewer.VerticalOffset
-                && _lastHitHorizontalOffset == tableView.HorizontalOffset
-                && _lastHitBounds.Contains(point))
-            {
-                return cached;
-            }
-
-            var row = TableView.RowFromHitTest(point, scrollViewer);
-
-            if (row is not null)
-            {
-                _lastHitRow = row;
-                _lastHitBounds = row.TransformToVisual(null)
-                                    .TransformBounds(new Rect(0, 0, row.ActualWidth, row.ActualHeight));
-                _lastHitVerticalOffset = scrollViewer.VerticalOffset;
-                _lastHitHorizontalOffset = tableView.HorizontalOffset;
-            }
-
-            return row;
-        }
-        catch (ArgumentException)
-        {
-            return null;   // element not in the visual tree during container recycling
         }
     }
 

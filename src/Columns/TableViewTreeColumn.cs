@@ -87,7 +87,9 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             Spacing = 6,
             VerticalAlignment = VerticalAlignment.Center,
         };
-        // Indent follows the (recycled) DataContext, not the item the cell was created for.
+        // The template roots this cell owns. See TemplateHosts.
+        var hosts = new List<FrameworkElement>();
+
         panel.SetBinding(FrameworkElement.MarginProperty, new Binding
         {
             Path = new PropertyPath(nameof(ITreeGridRow.Depth)),
@@ -179,13 +181,11 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
                         Converter = OverrideVisibilityConverter.WhenFalse,
                     });
 
-                    var over = new ContentControl
-                    {
-                        ContentTemplate = GlyphOverrideTemplate,
-                        VerticalAlignment = VerticalAlignment.Center,
-                        IsTabStop = false,
-                    };
-                    over.SetBinding(ContentControl.ContentProperty, new Binding()); // the row item
+                    // The template's own root, loaded once and re-pointed on every refresh — not a
+                    // ContentControl wrapped around it. See TemplateHosts.
+                    var over = (FrameworkElement)GlyphOverrideTemplate!.LoadContent();
+                    over.VerticalAlignment = VerticalAlignment.Center;
+                    hosts.Add(over);
                     over.SetBinding(UIElement.VisibilityProperty, new Binding
                     {
                         Path = GlyphOverrideBinding.Path,
@@ -201,13 +201,9 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
 
                 if (hasIcon)
                 {
-                    var icon = new ContentControl
-                    {
-                        ContentTemplate = IconTemplate,
-                        VerticalAlignment = VerticalAlignment.Center,
-                        IsTabStop = false,
-                    };
-                    icon.SetBinding(ContentControl.ContentProperty, new Binding()); // the row item
+                    var icon = (FrameworkElement)IconTemplate!.LoadContent();
+                    icon.VerticalAlignment = VerticalAlignment.Center;
+                    hosts.Add(icon);
                     icon.SetBinding(UIElement.VisibilityProperty, new Binding
                     {
                         Path = IconVisibleBinding!.Path,
@@ -237,12 +233,74 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             text.SetBinding(TextBlock.ForegroundProperty, TextForegroundBinding);
         panel.Children.Add(text);
 
+        // Last, so it is written once with everything the panel is going to hold.
+        panel.Tag = new TemplateHosts(hosts);
+        ShowItem(panel, dataItem);
         return panel;
     }
+
+    /// <summary>
+    /// The template roots inside one generated cell, kept on the panel that owns them.
+    ///
+    /// <para>Per ELEMENT and not per item, so it does not go stale the way the class remarks warn
+    /// about: it is the same list for as long as the panel exists, whichever row the panel is showing.
+    /// <see cref="ShowItem"/> points each of them at the current row on every refresh.</para>
+    ///
+    /// <para>The glyph override and the row icon used to be <c>ContentControl</c>s with a
+    /// <c>ContentTemplate</c>, their <c>Content</c> bound to <c>{Binding}</c> — the data context
+    /// itself. That does not survive recycling, and it fails in a way that hides: measured on
+    /// 2026-09-11, the control's own data context and Content were BOTH the row the cell had moved to,
+    /// while the ContentPresenter and the whole template under it still held the row before. So the
+    /// drag handle of a row the pointer had left was drawn over a row that wanted none, and a
+    /// now-playing animation likewise. Nothing above the presenter said anything was wrong.</para>
+    ///
+    /// <para>The template is loaded once instead, with <c>LoadContent</c>, and this column sets the
+    /// data context of the root itself. That is one assignment it can be sure of, and it is a control
+    /// and a content presenter per cell cheaper than the wrapper it replaces.</para>
+    /// </summary>
+    private sealed record TemplateHosts(IReadOnlyList<FrameworkElement> Hosts);
 
     /// <inheritdoc/>
     public override FrameworkElement GenerateEditingElement(TableViewCell cell, object? dataItem)
         => GenerateElement(cell, dataItem); // never editable
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// A cell is recycled onto a different row, and everything this column draws is a binding against
+    /// the cell's data context — so the whole of "show the new row" is pointing that data context at
+    /// it. This column used to override nothing here and let the context be INHERITED from the row,
+    /// which is right until it is not: a cell was measured on 2026-09-11 still bound to the row it had
+    /// before, drawing that row's drag handle over a row that wanted none. Inheritance is not something
+    /// this column can check; the assignment is.
+    /// </remarks>
+    public override void RefreshElement(TableViewCell cell, object? dataItem)
+    {
+        if (cell.Content is FrameworkElement panel)
+        {
+            ShowItem(panel, dataItem);
+        }
+    }
+
+    /// <summary>
+    /// Points a generated cell at the row it is for.
+    ///
+    /// <para>Set on the element and not inherited from the cell. The class remarks say nothing may be
+    /// captured per item, and this does not capture: it is written again on every refresh, which is
+    /// what makes it safe to write at all. An inherited context is one this column cannot verify and
+    /// cannot correct, and a stale one leaves every binding here reading the wrong row.</para>
+    /// </summary>
+    private static void ShowItem(FrameworkElement panel, object? dataItem)
+    {
+        panel.DataContext = dataItem;
+
+        if (panel.Tag is TemplateHosts hosted)
+        {
+            foreach (var host in hosted.Hosts)
+            {
+                host.DataContext = dataItem;
+            }
+        }
+    }
 
     private sealed partial class ChevronGlyphConverter : IValueConverter
     {

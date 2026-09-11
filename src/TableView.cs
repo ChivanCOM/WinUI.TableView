@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Data;
@@ -36,6 +36,8 @@ public partial class TableView : ListView
 {
     private TableViewHeaderRow? _headerRow;
     private ScrollViewer? _scrollViewer;
+    private ScrollMode? _panningVerticalWas;
+    private ScrollMode? _panningHorizontalWas;
     private RowDefinition? _headerRowDefinition;
     private bool _shouldThrowSelectionModeChangedException;
     private bool _ensureColumns = true;
@@ -320,7 +322,7 @@ public partial class TableView : ListView
     /// </summary>
     public static Action<string>? DiagnosticsWriter;
 
-    private static void Report(string line)
+    internal static void Report(string line)
     {
         if (DiagnosticsWriter is { } writer)
         {
@@ -880,6 +882,74 @@ public partial class TableView : ListView
         return false;
     }
 
+    /// <summary>
+    /// FOBO fork addition. Whether the grid's own panning is held off while a host drags something
+    /// across it with the pointer.
+    ///
+    /// <para><b>Why a host cannot do this itself.</b> Marking the pointer event handled stops the
+    /// routed event and nothing else. On Windows the grid is scrolled by DirectManipulation, which is
+    /// a separate input pipeline that never sees Handled, so a host that captures the pointer and
+    /// moves rows by hand gets its drag AND a pan at the same time: the content slides under the
+    /// pointer, the pointer's position relative to the grid barely changes, and the drag it computes
+    /// from that goes nowhere. Uno scrolls in managed code off the same routed events, so the same
+    /// host code behaves there and this is a no-op.</para>
+    ///
+    /// <para>Set it for the length of the drag and clear it after. The scroll modes in force when it
+    /// is set are put back when it is cleared, so a grid that had scrolling off for its own reasons
+    /// keeps it off. Setting it before the template has been applied is allowed; it takes effect when
+    /// the ScrollViewer arrives.</para>
+    /// </summary>
+    public bool PanningSuspended
+    {
+        get;
+        set
+        {
+            if (field == value)
+            {
+                return;
+            }
+
+            field = value;
+            ApplyPanningSuspension();
+        }
+    }
+
+    private void ApplyPanningSuspension()
+    {
+        if (_scrollViewer is not { } scrollViewer)
+        {
+            return;
+        }
+
+        if (PanningSuspended)
+        {
+            // Remembered once. A second call while already suspended must not record Disabled as the
+            // state to go back to.
+            _panningVerticalWas ??= scrollViewer.VerticalScrollMode;
+            _panningHorizontalWas ??= scrollViewer.HorizontalScrollMode;
+
+            scrollViewer.VerticalScrollMode = ScrollMode.Disabled;
+            scrollViewer.HorizontalScrollMode = ScrollMode.Disabled;
+
+            // Disabling stops the next pan; this stops the one already under way, which is the one
+            // that started in the same press as the drag.
+            scrollViewer.CancelDirectManipulations();
+            return;
+        }
+
+        if (_panningVerticalWas is { } vertical)
+        {
+            scrollViewer.VerticalScrollMode = vertical;
+            _panningVerticalWas = null;
+        }
+
+        if (_panningHorizontalWas is { } horizontal)
+        {
+            scrollViewer.HorizontalScrollMode = horizontal;
+            _panningHorizontalWas = null;
+        }
+    }
+
     /// <inheritdoc/>
     protected async override void OnApplyTemplate()
     {
@@ -891,6 +961,7 @@ public partial class TableView : ListView
         DragRectangleCanvas = GetTemplateChild("DragRectangleCanvas") as Canvas;
         _dragRectangle = GetTemplateChild("DragRectangle") as Border;
         _scrollViewer?.Loaded += OnScrollViewerLoaded;
+        ApplyPanningSuspension();   // the template may have arrived after a host asked for it
 
         if (IsLoaded)
         {
@@ -3529,6 +3600,33 @@ public partial class TableView : ListView
         return true;
     }
 
+    /// <summary>
+    /// The realized row at <paramref name="index"/> when all of it is inside the viewport, or null.
+    ///
+    /// <para>Null for a row that is not realized, half under the header or half off the bottom —
+    /// every case where a reveal has something to do. The header is part of the answer: a row behind
+    /// it is not one the reader can see.</para>
+    /// </summary>
+    private TableViewRow? FullyInViewport(int index)
+    {
+        if (_scrollViewer is null || ContainerFromIndex(index) is not TableViewRow row || row.ActualHeight <= 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            var top = row.TransformToVisual(_scrollViewer).TransformPoint(new Point(0, 0)).Y;
+            return top >= HeaderRowHeight && top + row.ActualHeight <= _scrollViewer.ViewportHeight
+                ? row
+                : null;
+        }
+        catch (ArgumentException)
+        {
+            return null;   // not in the visual tree: mid-recycle, so not in view either
+        }
+    }
+
     public async Task<TableViewCell> ScrollCellIntoView(TableViewCellSlot slot)
     {
         if (_scrollViewer is null || !slot.IsValid(this) || await ScrollRowIntoView(slot.Row) is not { } row)
@@ -3586,6 +3684,19 @@ public partial class TableView : ListView
     public async Task<TableViewRow?> ScrollRowIntoView(int index)
     {
         if (_scrollViewer is null || index < 0) return default!;
+
+        // Already all the way in view: nothing to reveal, and revealing it anyway is worse than
+        // doing nothing. Selecting a row asks for that row to be revealed (see SelectRows, and the
+        // single-selection case in OnSelectionChanged), so an ordinary click on a row the reader is
+        // already looking at ran the whole reveal — which lands on a row boundary and moved the list
+        // by a few pixels. Two costs, both reported from the app: the list twitched on every click,
+        // and the row moved out from under the pointer between the two clicks of a double-click, so
+        // starting a track took three.
+        if (FullyInViewport(index) is { } showing)
+        {
+            DiagLastJump = $"row={index} decision=already-in-view";
+            return showing;
+        }
 
 #if !WINDOWS
         // A LONG reveal asked for in the same turn as a rebuild — which is exactly what following a
@@ -3730,12 +3841,28 @@ public partial class TableView : ListView
     {
         _shouldThrowSelectionModeChangedException = true;
 
+#if WINDOWS
+        // The base list keeps row selection on this head. The fork's own row paths are not actually
+        // independent of it: SelectRows still goes through SelectRange, DeselectRange and
+        // SelectedIndex, and on Windows all three THROW when the base mode is None —
+        // "SelectAll can be called only when the value of SelectionMode is Multiple or Extended",
+        // raised by ListViewBase.SelectRange. So every row selection died on its way out of
+        // MakeSelection and nothing was ever highlighted. Uno does not validate the mode on those
+        // calls, which is the only reason the experiment below reads as working there.
+        //
+        // The experiment's own reason is Uno's, too: the O(N) ExtendedSelectionCase it avoids is
+        // Uno's implementation. There is nothing to avoid here, and this is what upstream does.
+        base.SelectionMode = SelectionUnit is TableViewSelectionUnit.Cell
+            ? ListViewSelectionMode.None
+            : SelectionMode;
+#else
         // EXPERIMENT (logical-selection redesign): force base None for rows too,
         // so Uno's O(N) ExtendedSelectionCase never runs on a row click — the fork's
         // MakeSelection/SelectRows is the sole row-selection authority (mirrors how
         // cell selection already works under base None). Was:
         //   SelectionUnit is Cell ? None : SelectionMode
         base.SelectionMode = ListViewSelectionMode.None;
+#endif
 
         UpdateHorizontalScrollBarMargin();
         _headerRow?.SetHeadersVisibility();

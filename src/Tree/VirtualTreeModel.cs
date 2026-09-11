@@ -72,6 +72,33 @@ public sealed class VirtualTreeModel
     private readonly Func<object?, int, object>? _placeholderAtOf;
     private readonly int _pageSize;
     private readonly int _maxPagesCached;
+
+    /// <summary>
+    /// How many leaf ROWS the page cache is holding.
+    ///
+    /// <para>The budget is counted in rows and not in pages, and that is the whole of a fault measured
+    /// on 2026-09-10. A page is one block's slice, and a block is one group, so a tree of small groups
+    /// makes small pages: an import queue of 26,663 files in 2,744 records averages ten rows a page. At
+    /// sixty-four PAGES that cache held about five hundred rows, so a screenful of records and the
+    /// blocks prefetched either side of it did not fit, and every read evicted the page the previous
+    /// read had just fetched. The queue was running about a thousand SELECTs a second, for ever, and
+    /// the rows on screen were built from pages that were no longer resident — so anything that asked
+    /// the cache what the reader was looking at got an answer about some other part of the list.</para>
+    ///
+    /// <para>So the page cap still governs — for big pages it is unchanged — but it never evicts
+    /// below <see cref="MinRowsCached"/> rows, and a row ceiling and a generous page ceiling bound the
+    /// other end. A page costs a dictionary entry and a list node whatever its length.</para>
+    /// </summary>
+    private int _cachedRows;
+
+    private int MaxRowsCached => _maxPagesCached * _pageSize;
+
+    /// <summary>Never evict below this many rows however many pages they are spread over.</summary>
+    private const int MinRowsCached = 2048;
+
+    /// <summary>A page costs a dictionary entry and a list node whatever its length, so their number
+    /// is bounded too, well above the point where the row budget normally binds.</summary>
+    private int MaxPagesHeld => _maxPagesCached * 32;
     private readonly int _maxConcurrentFetches;
     private readonly long _failureCooldownTicks;
 
@@ -437,6 +464,7 @@ public sealed class VirtualTreeModel
             leaf.PropertyChanged -= OnLeafPropertyChanged;
         _subscribedLeaves.Clear();
         _pages.Clear();
+        _cachedRows = 0;
         _placeholderPages.Clear();
         _placeholderIndex.Clear();
         _pageLru.Clear();
@@ -576,13 +604,22 @@ public sealed class VirtualTreeModel
         var inPage = local % _pageSize;
 
         var key = (seg.Group, page);
-        if (fetchIfMissing)
+        var resident = _pages.TryGetValue(key, out var buffer);
+
+        // Only when this read MISSED. Speculating on every read costs nothing when the neighbour is
+        // already resident, but the queue's blocks are one record each and a read is therefore always
+        // within a margin of its block's edge, so every read queued both neighbours, every page that
+        // landed replaced its rows one by one, and each replacement was another read that speculated
+        // again. Measured on 2026-09-11 over 26,663 rows: scrolling 6,000 of them cost 11,687 reads of
+        // the store where the rows themselves account for 660. Asked only when a read ran out, the
+        // same scroll costs 660 and still loads the next block before the reader reaches it.
+        if (fetchIfMissing && !resident)
             MaybePrefetchNeighbor(seg, local);
 
-        if (_pages.TryGetValue(key, out var buffer))
+        if (resident)
         {
             TouchLru(key);
-            return buffer[inPage] ?? PlaceholderAt(key, inPage);
+            return buffer![inPage] ?? PlaceholderAt(key, inPage);
         }
 
         if (fetchIfMissing && !_pagesInFlight.Contains(key) && !InCooldown(key))
@@ -902,7 +939,10 @@ public sealed class VirtualTreeModel
             for (var i = 0; i < limit && i < rows.Count; i++)
                 buffer[i] = rows[i];
 
+            if (_pages.TryGetValue(key, out var replacing))
+                _cachedRows -= replacing.Length;
             _pages[key] = buffer;
+            _cachedRows += buffer.Length;
             _pagesInFlight.Remove(key);
             _pageFailures.Remove(key);
             _pageCooldownUntil.Remove(key);
@@ -990,7 +1030,10 @@ public sealed class VirtualTreeModel
 
     private void EvictIfNeeded()
     {
-        while (_pages.Count > _maxPagesCached && _pageLru.First is { } victim)
+        while (((_pages.Count > _maxPagesCached && _cachedRows > MinRowsCached)
+                || _cachedRows > MaxRowsCached
+                || _pages.Count > MaxPagesHeld)
+               && _pageLru.First is { } victim)
         {
             _pageLru.RemoveFirst();
             _pageLruNodes.Remove(victim.Value);
@@ -1005,7 +1048,8 @@ public sealed class VirtualTreeModel
                     DeindexLeaf(victim.Value, row);
                 }
             }
-            _pages.Remove(victim.Value);
+            if (_pages.Remove(victim.Value, out var dropped))
+                _cachedRows -= dropped.Length;
             // No notification: the indices still exist; re-access returns
             // the placeholder and re-triggers the fetch.
         }

@@ -98,13 +98,17 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
 
     /// <summary>
     /// Singleton returned for indices whose page has not yet been
-    /// fetched. <see cref="TableView"/> renders cells with this object
-    /// as their data context — bindings simply produce empty values
-    /// until the page lands and a Replace notification swaps in the
-    /// real row.
+    /// fetched. Cells show nothing for it until the page lands and a
+    /// Replace notification swaps in the real row.
     /// </summary>
+    /// <remarks>
+    /// It is an <see cref="ITableViewPlaceholderItem"/>, which is what
+    /// keeps it out of a cell's data context: it carries none of the
+    /// host's row properties, and a cell template that binds one by path
+    /// against it logs a binding error per element per row realized.
+    /// </remarks>
     public static readonly object Placeholder = new PlaceholderInstance();
-    private sealed class PlaceholderInstance
+    private sealed class PlaceholderInstance : ITableViewPlaceholderItem
     {
         public override string ToString() => "";
     }
@@ -690,12 +694,19 @@ public sealed class SqlBackedItemsSource : ITableViewItemsSource, IList
 
     /// <summary>
     /// The rows currently held in memory, in no particular order and
-    /// without the placeholders. A host that wants to poke every row it
-    /// can see — re-raise a property on each, repaint a mark — must ask
-    /// for these and not enumerate the source: <see cref="GetEnumerator"/>
-    /// walks all <see cref="Count"/> indices, and on a collection sized
-    /// in the millions that is a million yields for the twenty rows that
-    /// exist.
+    /// without the placeholders. Ask for these rather than enumerating the
+    /// source: <see cref="GetEnumerator"/> walks all <see cref="Count"/>
+    /// indices, and on a collection sized in the millions that is a
+    /// million yields for the twenty rows that exist.
+    ///
+    /// <para>NOT the set to poke when the work is about what is DRAWN, so
+    /// not for re-raising a property on every visible row or repainting a
+    /// mark. This summary used to recommend itself for exactly that and it
+    /// was wrong: these are the PAGES, and a page evicted and fetched again
+    /// builds new row objects while the container on screen goes on showing
+    /// the old one, which then hears nothing. Use
+    /// <c>TableView.ItemsOnScreen()</c>, which reads the panel's own
+    /// children.</para>
     /// </summary>
     public IEnumerable<object> CachedRows
     {

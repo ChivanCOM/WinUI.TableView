@@ -108,7 +108,13 @@ public abstract partial class TableViewColumn : DependencyObject
     /// <returns>The content of the cell.</returns>
     public virtual object? GetCellContent(object? dataItem)
     {
-        if (dataItem is null)
+        // A placeholder is treated exactly like nothing at all. It is not the host's row type and does
+        // not carry the bound property, so building a getter for that path against it THROWS — the
+        // getter builder catches it and remembers null, but the throw itself is paid once per column
+        // per placeholder type, and on a virtualized grid a scroll ahead of the pages produces a steady
+        // stream of them. Measured on 2026-09-11: eleven throws in nine seconds with the app merely
+        // idling on a list, all of them this. See ITableViewPlaceholderItem.
+        if (dataItem is null or ITableViewPlaceholderItem)
             return null;
 
         if (!string.IsNullOrWhiteSpace(OperationContentBindingPropertyPath)
@@ -177,7 +183,9 @@ public abstract partial class TableViewColumn : DependencyObject
     /// <returns>The clipboard content of the cell.</returns>
     public virtual object? GetClipboardContent(object? dataItem)
     {
-        if (dataItem is null)
+        // Nothing to copy out of a row that has not arrived, and asking costs a throw: see
+        // GetCellContent.
+        if (dataItem is null or ITableViewPlaceholderItem)
             return null;
 
         if (!string.IsNullOrWhiteSpace(ClipboardContentBindingPropertyPath)

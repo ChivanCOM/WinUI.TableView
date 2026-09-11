@@ -384,6 +384,7 @@ public partial class TableViewCell : ContentControl
         ReleasePointerCaptures();
         _dragOrigin = null;
         _lastHitCell = null;
+        _rowHits.Forget();
 
         e.Handled = true;
     }
@@ -413,6 +414,7 @@ public partial class TableViewCell : ContentControl
         ReleasePointerCaptures();
         _dragOrigin = null;
         _lastHitCell = null;
+        _rowHits.Forget();
     }
 
     /// <summary>Where the pointer went down, so a click can be told from a drag.</summary>
@@ -478,12 +480,23 @@ public partial class TableViewCell : ContentControl
                 }
             }
 
-            // Selection via FindCell — same proven path whether rectangle is on or off.
-            // When the pointer is outside the viewport, FindCell returns null and selection
-            // is updated by the ViewChanged handler on the next auto-scroll tick.
-            var cell = FindCell(e.Position);
-
-            if (cell is not null && cell.Slot != TableView?.CurrentCellSlot)
+            // A grid that selects whole ROWS is asked which row, not which cell. It is the same
+            // selection either way — MakeSelection is given an invalid column and takes the row — but
+            // it is a far cheaper question: a row spans the grid, so a pointer moving along one is
+            // answered from the cache, where a cell is one column wide and a sweep across a dozen
+            // columns walked the visual tree on nearly every move. That is what made this sweep lag
+            // the pointer while the light-row path, which always hit-tested rows, kept up.
+            //
+            // When the pointer is outside the viewport neither finds anything, and the selection is
+            // carried on by the ViewChanged handler on the next auto-scroll tick.
+            if (TableView is { SelectionUnit: TableViewSelectionUnit.Row } rowGrid)
+            {
+                if (_rowHits.Find(this, rowGrid, e.Position) is { } row && row.Index != rowGrid.CurrentRowIndex)
+                {
+                    rowGrid.MakeSelection(new TableViewCellSlot(row.Index, -1), true, rowGrid.IsPointerCtrlDown);
+                }
+            }
+            else if (FindCell(e.Position) is { } cell && cell.Slot != TableView?.CurrentCellSlot)
             {
                 TableView?.MakeSelection(cell.Slot, true, TableView.IsPointerCtrlDown);
             }
@@ -525,6 +538,9 @@ public partial class TableViewCell : ContentControl
     // same cell, so remember the last hit and its bounds and only re-hit-test once the pointer
     // leaves them — invalidated whenever the view scrolls (offsets are part of the cache) or
     // the gesture ends (containers may recycle between gestures).
+    /// <summary>Which row the sweep is over, for a grid that selects rows. See <see cref="RowHitCache"/>.</summary>
+    private readonly RowHitCache _rowHits = new();
+
     private TableViewCell? _lastHitCell;
     private Rect _lastHitBounds;
     private double _lastHitVerticalOffset;

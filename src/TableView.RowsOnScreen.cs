@@ -69,6 +69,30 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Every item the grid is currently showing, however its row got onto the screen.
+    ///
+    /// <para>For a host that has to poke each visible row: re-raise a property on it, re-read a mark.
+    /// <c>SqlBackedItemsSource.CachedRows</c> is the wrong set for that, and its own summary used to
+    /// recommend itself for it. That is the source's PAGE CACHE, and a page evicted and fetched again
+    /// builds new row objects while the container on screen goes on showing the old one. A change
+    /// raised on the cache then reaches an object no binding is attached to any more, and the row the
+    /// reader is looking at never hears. Measured 2026-09-10 on the track list: the now-playing mark
+    /// stayed on a row that had stopped and never appeared on the one that started, and scrolling the
+    /// row off and back — which rebinds it — was what put it right.</para>
+    ///
+    /// <para>The panel's children are what the bindings on screen are attached to, which is the fact
+    /// that holds whenever it is asked. The cache is still the right set for work that is about the
+    /// DATA rather than about what is drawn.</para>
+    /// </summary>
+    public IEnumerable<object?> ItemsOnScreen()
+    {
+        foreach (var row in RowsOnScreen())
+        {
+            yield return row.Content;
+        }
+    }
+
+    /// <summary>
     /// Every row showing <paramref name="item"/>. Usually one; never assumed to be.
     ///
     /// <para>Two containers can hold the same item object for a moment — a host that REUSES its row
